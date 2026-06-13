@@ -213,4 +213,29 @@ router.post("/users/:id/reset-password", requireAuth, requireRole("super_admin")
   res.json({ message: "Password reset successfully" });
 });
 
+// ─── Physicians list — accessible by all authenticated staff ─────────────
+router.get("/physicians", requireAuth, async (req, res): Promise<void> => {
+  const search = typeof req.query.search === "string" ? req.query.search : "";
+  const conditions = [eq(usersTable.role, "physician"), eq(usersTable.isActive, true)];
+  if (search) {
+    conditions.push(
+      or(
+        ilike(usersTable.lastName, `%${search}%`),
+        ilike(usersTable.firstName, `%${search}%`),
+        ilike(usersTable.username, `%${search}%`),
+      ) as any
+    );
+  }
+  const physicians = await db
+    .select({ id: usersTable.id, firstName: usersTable.firstName, lastName: usersTable.lastName, username: usersTable.username })
+    .from(usersTable)
+    .where(and(...conditions));
+
+  res.json(physicians.map((p) => ({
+    id: p.id,
+    name: `Dr. ${p.lastName}, ${p.firstName}`,
+    username: p.username,
+  })));
+});
+
 export default router;

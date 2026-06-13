@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { eq, sql, and, gte, lte, desc } from "drizzle-orm";
-import { db, resultsTable, patientsTable, usersTable } from "@workspace/db";
+import { eq, sql, and, gte, lte, desc, inArray } from "drizzle-orm";
+import { db, resultsTable, patientsTable, usersTable, patientPhysiciansTable } from "@workspace/db";
 import {
   ListResultsQueryParams,
   GetResultParams,
@@ -19,6 +19,59 @@ import path from "path";
 import fs from "fs";
 
 const router = Router();
+
+// Categories visible per role (empty = all)
+const DEPT_CATEGORIES: Record<string, string[]> = {
+  laboratory: ["laboratory"],
+  radiology: ["radiology", "ultrasound", "ct_scan", "mri", "ecg", "echo_2d", "rehabilitation", "other"],
+};
+
+/** Build extra WHERE conditions based on the caller's role. Returns null → no results allowed. */
+async function buildRoleConditions(
+  req: import("express").Request
+): Promise<ReturnType<typeof eq>[] | null> {
+  const role = req.user!.role;
+  const extra: ReturnType<typeof eq>[] = [];
+
+  if (DEPT_CATEGORIES[role]) {
+    extra.push(inArray(resultsTable.category, DEPT_CATEGORIES[role] as any) as any);
+  } else if (role === "physician") {
+    const rows = await db
+      .select({ patientId: patientPhysiciansTable.patientId })
+      .from(patientPhysiciansTable)
+      .where(eq(patientPhysiciansTable.physicianId, req.user!.userId));
+    const ids = rows.map((r) => r.patientId);
+    if (ids.length === 0) return null;
+    extra.push(inArray(resultsTable.patientId, ids) as any);
+    extra.push(eq(resultsTable.status, "released") as any);
+  }
+
+  return extra;
+}
+
+/** Returns true if the caller is allowed to access this specific result. */
+async function canAccessResult(
+  req: import("express").Request,
+  result: typeof resultsTable.$inferSelect
+): Promise<boolean> {
+  const role = req.user!.role;
+  if (role === "super_admin" || role === "medical_records") return true;
+  if (DEPT_CATEGORIES[role]) return DEPT_CATEGORIES[role].includes(result.category);
+  if (role === "physician") {
+    if (result.status !== "released") return false;
+    const [row] = await db
+      .select()
+      .from(patientPhysiciansTable)
+      .where(
+        and(
+          eq(patientPhysiciansTable.patientId, result.patientId),
+          eq(patientPhysiciansTable.physicianId, req.user!.userId)
+        )
+      );
+    return !!row;
+  }
+  return false;
+}
 
 async function formatResult(r: typeof resultsTable.$inferSelect) {
   const [patient] = await db.select().from(patientsTable).where(eq(patientsTable.id, r.patientId));
@@ -46,6 +99,7 @@ async function formatResult(r: typeof resultsTable.$inferSelect) {
   };
 }
 
+// ─── List results ─────────────────────────────────────────────────────────
 router.get("/results", requireAuth, async (req, res): Promise<void> => {
   const params = ListResultsQueryParams.safeParse(req.query);
   if (!params.success) {
@@ -55,13 +109,19 @@ router.get("/results", requireAuth, async (req, res): Promise<void> => {
 
   const { patientId, category, status, uploadedBy, dateFrom, dateTo, page = 1, limit = 20 } = params.data;
 
-  const conditions = [];
-  if (patientId) conditions.push(eq(resultsTable.patientId, patientId));
-  if (category) conditions.push(eq(resultsTable.category, category as typeof resultsTable.$inferSelect["category"]));
-  if (status) conditions.push(eq(resultsTable.status, status as typeof resultsTable.$inferSelect["status"]));
-  if (uploadedBy) conditions.push(eq(resultsTable.uploadedById, uploadedBy));
-  if (dateFrom) conditions.push(gte(resultsTable.uploadedAt, new Date(dateFrom)));
-  if (dateTo) conditions.push(lte(resultsTable.uploadedAt, new Date(dateTo)));
+  const roleConditions = await buildRoleConditions(req);
+  if (roleConditions === null) {
+    res.json({ data: [], total: 0, page, limit });
+    return;
+  }
+
+  const conditions = [...roleConditions];
+  if (patientId) conditions.push(eq(resultsTable.patientId, patientId) as any);
+  if (category) conditions.push(eq(resultsTable.category, category as any) as any);
+  if (status) conditions.push(eq(resultsTable.status, status as any) as any);
+  if (uploadedBy) conditions.push(eq(resultsTable.uploadedById, uploadedBy) as any);
+  if (dateFrom) conditions.push(gte(resultsTable.uploadedAt, new Date(dateFrom)) as any);
+  if (dateTo) conditions.push(lte(resultsTable.uploadedAt, new Date(dateTo)) as any);
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
@@ -88,6 +148,7 @@ router.get("/results", requireAuth, async (req, res): Promise<void> => {
   });
 });
 
+// ─── Upload ───────────────────────────────────────────────────────────────
 router.post("/results/upload", requireAuth, upload.single("file"), async (req, res): Promise<void> => {
   if (!req.file) {
     res.status(400).json({ error: "No file uploaded" });
@@ -102,6 +163,13 @@ router.post("/results/upload", requireAuth, upload.single("file"), async (req, r
 
   if (!patientId || !category || !releaseOption) {
     res.status(400).json({ error: "Missing required fields: patientId, category, releaseOption" });
+    return;
+  }
+
+  // Department check: lab staff can only upload lab results, radiology only their categories
+  const role = req.user!.role;
+  if (DEPT_CATEGORIES[role] && !DEPT_CATEGORIES[role].includes(category)) {
+    res.status(403).json({ error: `Your department (${role}) is not authorized to upload ${category} results` });
     return;
   }
 
@@ -152,6 +220,7 @@ router.post("/results/upload", requireAuth, upload.single("file"), async (req, r
   res.status(201).json(await formatResult(result));
 });
 
+// ─── Get single result ────────────────────────────────────────────────────
 router.get("/results/:id", requireAuth, async (req, res): Promise<void> => {
   const params = GetResultParams.safeParse(req.params);
   if (!params.success) {
@@ -162,6 +231,11 @@ router.get("/results/:id", requireAuth, async (req, res): Promise<void> => {
   const [result] = await db.select().from(resultsTable).where(eq(resultsTable.id, params.data.id));
   if (!result) {
     res.status(404).json({ error: "Result not found" });
+    return;
+  }
+
+  if (!(await canAccessResult(req, result))) {
+    res.status(403).json({ error: "Not authorized to access this result" });
     return;
   }
 
@@ -177,6 +251,7 @@ router.get("/results/:id", requireAuth, async (req, res): Promise<void> => {
   res.json(await formatResult(result));
 });
 
+// ─── Update result ────────────────────────────────────────────────────────
 router.patch("/results/:id", requireAuth, async (req, res): Promise<void> => {
   const params = UpdateResultParams.safeParse(req.params);
   if (!params.success) {
@@ -187,6 +262,12 @@ router.patch("/results/:id", requireAuth, async (req, res): Promise<void> => {
   const parsed = UpdateResultBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const [existing] = await db.select().from(resultsTable).where(eq(resultsTable.id, params.data.id));
+  if (!existing || !(await canAccessResult(req, existing))) {
+    res.status(403).json({ error: "Not authorized to modify this result" });
     return;
   }
 
@@ -220,6 +301,7 @@ router.patch("/results/:id", requireAuth, async (req, res): Promise<void> => {
   res.json(await formatResult(result));
 });
 
+// ─── Delete result ────────────────────────────────────────────────────────
 router.delete("/results/:id", requireAuth, async (req, res): Promise<void> => {
   const params = DeleteResultParams.safeParse(req.params);
   if (!params.success) {
@@ -230,6 +312,11 @@ router.delete("/results/:id", requireAuth, async (req, res): Promise<void> => {
   const [result] = await db.select().from(resultsTable).where(eq(resultsTable.id, params.data.id));
   if (!result) {
     res.status(404).json({ error: "Result not found" });
+    return;
+  }
+
+  if (!(await canAccessResult(req, result))) {
+    res.status(403).json({ error: "Not authorized to delete this result" });
     return;
   }
 
@@ -248,6 +335,7 @@ router.delete("/results/:id", requireAuth, async (req, res): Promise<void> => {
   res.json({ message: "Result deleted successfully" });
 });
 
+// ─── Release result ───────────────────────────────────────────────────────
 router.post("/results/:id/release", requireAuth, async (req, res): Promise<void> => {
   const params = ReleaseResultParams.safeParse(req.params);
   if (!params.success) {
@@ -261,9 +349,13 @@ router.post("/results/:id/release", requireAuth, async (req, res): Promise<void>
     return;
   }
 
-  const updates: Record<string, unknown> = {
-    releaseOption: parsed.data.releaseOption,
-  };
+  const [existing] = await db.select().from(resultsTable).where(eq(resultsTable.id, params.data.id));
+  if (!existing || !(await canAccessResult(req, existing))) {
+    res.status(403).json({ error: "Not authorized to release this result" });
+    return;
+  }
+
+  const updates: Record<string, unknown> = { releaseOption: parsed.data.releaseOption };
 
   if (parsed.data.releaseOption === "immediate") {
     updates.status = "released";
@@ -295,6 +387,7 @@ router.post("/results/:id/release", requireAuth, async (req, res): Promise<void>
   res.json(await formatResult(result));
 });
 
+// ─── Download URL ─────────────────────────────────────────────────────────
 router.get("/results/:id/download", requireAuth, async (req, res): Promise<void> => {
   const params = GetResultDownloadUrlParams.safeParse(req.params);
   if (!params.success) {
@@ -305,6 +398,11 @@ router.get("/results/:id/download", requireAuth, async (req, res): Promise<void>
   const [result] = await db.select().from(resultsTable).where(eq(resultsTable.id, params.data.id));
   if (!result) {
     res.status(404).json({ error: "Result not found" });
+    return;
+  }
+
+  if (!(await canAccessResult(req, result))) {
+    res.status(403).json({ error: "Not authorized to download this result" });
     return;
   }
 
@@ -320,13 +418,10 @@ router.get("/results/:id/download", requireAuth, async (req, res): Promise<void>
     details: "Generated download link",
   });
 
-  res.json({
-    url: `/api/results/file/${token}`,
-    expiresAt,
-  });
+  res.json({ url: `/api/results/file/${token}`, expiresAt });
 });
 
-// Serve actual file via signed token
+// ─── Serve file via signed token ──────────────────────────────────────────
 router.get("/results/file/:token", async (req, res): Promise<void> => {
   const { token } = req.params as { token: string };
   const payload = verifyToken(token);

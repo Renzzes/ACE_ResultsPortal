@@ -6,14 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Check, Copy, ArrowLeft, AlertTriangle, Upload, User } from "lucide-react";
+import { useAuth } from "@/lib/auth";
+import { Check, Copy, ArrowLeft, AlertTriangle, Upload, User, Stethoscope, X } from "lucide-react";
 
-interface ExistingPatient {
-  id: number;
-  patientHisId: string;
-  lastName: string;
-  firstName: string;
-}
+interface ExistingPatient { id: number; patientHisId: string; lastName: string; firstName: string }
+interface Physician { id: number; name: string; username: string }
 
 function DuplicateAlert({ patient, onDismiss }: { patient: ExistingPatient; onDismiss: () => void }) {
   const [, setLocation] = useLocation();
@@ -24,11 +21,10 @@ function DuplicateAlert({ patient, onDismiss }: { patient: ExistingPatient; onDi
         <div>
           <p className="font-semibold text-amber-900">Patient already registered</p>
           <p className="text-sm text-amber-800 mt-0.5">
-            A record for <span className="font-mono font-semibold">{patient.patientHisId}</span> already exists in the system.
+            A record for <span className="font-mono font-semibold">{patient.patientHisId}</span> already exists.
           </p>
         </div>
       </div>
-
       <div className="bg-white border border-amber-200 rounded-lg px-4 py-3 flex items-center gap-3">
         <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0">
           <User className="w-4 h-4 text-amber-700" />
@@ -38,36 +34,15 @@ function DuplicateAlert({ patient, onDismiss }: { patient: ExistingPatient; onDi
           <p className="text-xs text-muted-foreground font-mono">{patient.patientHisId}</p>
         </div>
       </div>
-
-      <p className="text-sm text-amber-800">
-        You can upload results to their existing account or view their record:
-      </p>
-
+      <p className="text-sm text-amber-800">You can upload results to their existing account:</p>
       <div className="flex gap-2 flex-wrap">
-        <Button
-          size="sm"
-          className="gap-1.5"
-          onClick={() => setLocation(`/results/upload?patientId=${patient.patientHisId}`)}
-        >
-          <Upload className="w-4 h-4" />
-          Upload Result for this Patient
+        <Button size="sm" className="gap-1.5" onClick={() => setLocation(`/results/upload?patientId=${patient.patientHisId}`)}>
+          <Upload className="w-4 h-4" />Upload Result for this Patient
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="gap-1.5"
-          onClick={() => setLocation(`/patients/${patient.id}`)}
-        >
-          <User className="w-4 h-4" />
-          View Patient Record
+        <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setLocation(`/patients/${patient.id}`)}>
+          <User className="w-4 h-4" />View Patient Record
         </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={onDismiss}
-        >
-          Enter a different ID
-        </Button>
+        <Button size="sm" variant="ghost" onClick={onDismiss}>Enter a different ID</Button>
       </div>
     </div>
   );
@@ -75,15 +50,12 @@ function DuplicateAlert({ patient, onDismiss }: { patient: ExistingPatient; onDi
 
 export default function NewPatientPage() {
   const [, setLocation] = useLocation();
+  const { auth } = useAuth();
   const { toast } = useToast();
+
   const [form, setForm] = useState({
-    patientHisId: "",
-    lastName: "",
-    firstName: "",
-    middleName: "",
-    dateOfBirth: "",
-    mobileNumber: "",
-    email: "",
+    patientHisId: "", lastName: "", firstName: "", middleName: "",
+    dateOfBirth: "", mobileNumber: "", email: "",
   });
   const [created, setCreated] = useState<{ accessCode: string; id: number; name: string } | null>(null);
   const [copied, setCopied] = useState(false);
@@ -91,17 +63,19 @@ export default function NewPatientPage() {
   const [hisIdChecked, setHisIdChecked] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Physician selector state
+  const [physicianSearch, setPhysicianSearch] = useState("");
+  const [physicianResults, setPhysicianResults] = useState<Physician[]>([]);
+  const [selectedPhysician, setSelectedPhysician] = useState<Physician | null>(null);
+  const [showPhysicianDrop, setShowPhysicianDrop] = useState(false);
+  const physicianDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const createPatient = useCreatePatient();
 
-  // Live HIS ID duplicate check — debounced 500ms after typing stops
+  // Live HIS ID duplicate check (debounced)
   const { data: hisIdCheckResult } = useListPatients(
     { search: hisIdChecked, limit: 1 },
-    {
-      query: {
-        queryKey: [...getListPatientsQueryKey({ search: hisIdChecked, limit: 1 }), "hischeck"],
-        enabled: hisIdChecked.length >= 3,
-      }
-    }
+    { query: { queryKey: [...getListPatientsQueryKey({ search: hisIdChecked, limit: 1 }), "hischeck"], enabled: hisIdChecked.length >= 3 } }
   );
 
   useEffect(() => {
@@ -109,12 +83,25 @@ export default function NewPatientPage() {
     const match = hisIdCheckResult?.data?.find(
       (p) => p.patientHisId.toLowerCase() === hisIdChecked.toLowerCase()
     );
-    if (match) {
-      setExistingPatient({ id: match.id, patientHisId: match.patientHisId, lastName: match.lastName, firstName: match.firstName });
-    } else {
-      setExistingPatient(null);
-    }
+    setExistingPatient(match
+      ? { id: match.id, patientHisId: match.patientHisId, lastName: match.lastName, firstName: match.firstName }
+      : null
+    );
   }, [hisIdCheckResult, hisIdChecked]);
+
+  // Physician search (debounced raw fetch — uses the new /api/physicians endpoint)
+  useEffect(() => {
+    if (!physicianSearch.trim()) { setPhysicianResults([]); return; }
+    if (physicianDebounceRef.current) clearTimeout(physicianDebounceRef.current);
+    physicianDebounceRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/physicians?search=${encodeURIComponent(physicianSearch)}`, {
+          headers: { Authorization: `Bearer ${auth.token}` },
+        });
+        if (res.ok) setPhysicianResults(await res.json());
+      } catch {}
+    }, 400);
+  }, [physicianSearch, auth.token]);
 
   const handleHisIdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
@@ -146,6 +133,8 @@ export default function NewPatientPage() {
           dateOfBirth: form.dateOfBirth,
           mobileNumber: form.mobileNumber || undefined,
           email: form.email || undefined,
+          // @ts-expect-error: physicianId is an extension not in the generated type
+          physicianId: selectedPhysician?.id ?? undefined,
         },
       },
       {
@@ -181,6 +170,11 @@ export default function NewPatientPage() {
             </div>
             <h2 className="text-2xl font-bold text-primary">Patient Registered</h2>
             <p className="text-muted-foreground">{created.name} has been added to the system.</p>
+            {selectedPhysician && (
+              <p className="text-sm text-muted-foreground">
+                Assigned to <span className="font-medium">{selectedPhysician.name}</span>
+              </p>
+            )}
           </div>
 
           <div className="bg-card border-2 border-secondary/30 rounded-xl p-6 text-center space-y-3">
@@ -195,18 +189,13 @@ export default function NewPatientPage() {
 
           <div className="flex gap-3">
             <Button className="flex-1" onClick={() => setLocation(`/patients/${created.id}`)}>View Patient</Button>
-            <Button
-              variant="outline"
-              className="flex-1"
-              onClick={() => setLocation(`/results/upload?patientId=${created.id}`)}
-            >
+            <Button variant="outline" className="flex-1" onClick={() => setLocation(`/results/upload?patientId=${created.id}`)}>
               <Upload className="w-4 h-4 mr-1.5" />Upload Result
             </Button>
             <Button variant="ghost" onClick={() => {
               setCreated(null);
               setForm({ patientHisId: "", lastName: "", firstName: "", middleName: "", dateOfBirth: "", mobileNumber: "", email: "" });
-              setExistingPatient(null);
-              setHisIdChecked("");
+              setExistingPatient(null); setHisIdChecked(""); setSelectedPhysician(null); setPhysicianSearch("");
             }}>Add Another</Button>
           </div>
         </div>
@@ -227,38 +216,28 @@ export default function NewPatientPage() {
           </div>
         </div>
 
-        {/* Duplicate alert — shown inline above the form */}
         {existingPatient && (
-          <DuplicateAlert
-            patient={existingPatient}
-            onDismiss={() => {
-              setExistingPatient(null);
-              setHisIdChecked("");
-              setForm(f => ({ ...f, patientHisId: "" }));
-            }}
-          />
+          <DuplicateAlert patient={existingPatient} onDismiss={() => {
+            setExistingPatient(null); setHisIdChecked("");
+            setForm(f => ({ ...f, patientHisId: "" }));
+          }} />
         )}
 
-        <form onSubmit={handleSubmit} className={`bg-card border border-border rounded-xl p-6 space-y-5 shadow-sm ${existingPatient ? "opacity-50 pointer-events-none" : ""}`}>
+        <form
+          onSubmit={handleSubmit}
+          className={`bg-card border border-border rounded-xl p-6 space-y-5 shadow-sm ${existingPatient ? "opacity-50 pointer-events-none" : ""}`}
+        >
           <div className="grid grid-cols-2 gap-4">
+            {/* HIS ID */}
             <div className="col-span-2 space-y-1.5">
               <Label htmlFor="hisId">Patient HIS ID <span className="text-destructive">*</span></Label>
-              <Input
-                id="hisId"
-                placeholder="e.g. ACE-2024-00001"
-                value={form.patientHisId}
-                onChange={handleHisIdChange}
-                autoComplete="off"
-              />
-              {hisIdChecked.length >= 3 && !existingPatient && !hisIdCheckResult && (
-                <p className="text-xs text-muted-foreground">Checking...</p>
-              )}
+              <Input id="hisId" placeholder="e.g. ACE-2024-00001" value={form.patientHisId} onChange={handleHisIdChange} autoComplete="off" />
               {hisIdChecked.length >= 3 && !existingPatient && hisIdCheckResult && (
-                <p className="text-xs text-green-600 flex items-center gap-1">
-                  <Check className="w-3 h-3" /> ID available
-                </p>
+                <p className="text-xs text-green-600 flex items-center gap-1"><Check className="w-3 h-3" /> ID available</p>
               )}
             </div>
+
+            {/* Name fields */}
             <div className="space-y-1.5">
               <Label htmlFor="lastName">Last Name <span className="text-destructive">*</span></Label>
               <Input id="lastName" placeholder="Dela Cruz" {...field("lastName")} />
@@ -283,6 +262,66 @@ export default function NewPatientPage() {
               <Label htmlFor="email">Email Address</Label>
               <Input id="email" type="email" placeholder="patient@email.com" {...field("email")} />
             </div>
+          </div>
+
+          {/* Physician assignment */}
+          <div className="border-t border-border pt-5 space-y-3">
+            <div className="flex items-center gap-2">
+              <Stethoscope className="w-4 h-4 text-muted-foreground" />
+              <Label className="text-sm font-semibold">Assign Attending Physician <span className="text-muted-foreground font-normal">(optional)</span></Label>
+            </div>
+
+            {selectedPhysician ? (
+              <div className="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-lg px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center">
+                    <Stethoscope className="w-4 h-4 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-medium text-sm">{selectedPhysician.name}</p>
+                    <p className="text-xs text-muted-foreground">@{selectedPhysician.username}</p>
+                  </div>
+                </div>
+                <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedPhysician(null); setPhysicianSearch(""); }}>
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
+            ) : (
+              <div className="relative">
+                <Input
+                  placeholder="Search physician by name..."
+                  value={physicianSearch}
+                  onChange={(e) => { setPhysicianSearch(e.target.value); setShowPhysicianDrop(true); }}
+                  onFocus={() => setShowPhysicianDrop(true)}
+                  onBlur={() => setTimeout(() => setShowPhysicianDrop(false), 150)}
+                />
+                {showPhysicianDrop && physicianResults.length > 0 && (
+                  <div className="absolute z-10 top-full mt-1 left-0 right-0 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                    {physicianResults.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        className="w-full text-left px-3 py-2 hover:bg-muted transition-colors flex items-center gap-2"
+                        onMouseDown={() => {
+                          setSelectedPhysician(p);
+                          setPhysicianSearch("");
+                          setShowPhysicianDrop(false);
+                        }}
+                      >
+                        <Stethoscope className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                        <div>
+                          <p className="text-sm font-medium">{p.name}</p>
+                          <p className="text-xs text-muted-foreground">@{p.username}</p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {physicianSearch.length > 0 && physicianResults.length === 0 && (
+                  <p className="text-xs text-muted-foreground mt-1.5">No physicians found. You can assign one later from the patient record.</p>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="flex gap-3 pt-2">
