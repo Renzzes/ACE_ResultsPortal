@@ -3,13 +3,31 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: ACE Results Portal API specification
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Authentication operations
+  - name: users
+    description: Staff user management
+  - name: patients
+    description: Patient record management
+  - name: results
+    description: Diagnostic result management
+  - name: patient-portal
+    description: Patient-facing portal
+  - name: physician-portal
+    description: Physician portal
+  - name: audit
+    description: Audit log management
+  - name: dashboard
+    description: Dashboard and reporting
+  - name: archive
+    description: Records archiving
 paths:
   /healthz:
     get:
@@ -24,6 +42,961 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  # Auth
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Staff/physician login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginCredentials"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Bad request
+        "401":
+          description: Invalid credentials
+        "403":
+          description: Account locked
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Logout current session
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      tags: [auth]
+      summary: Refresh access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshTokenInput"
+      responses:
+        "200":
+          description: New access token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          description: Invalid refresh token
+
+  /auth/me:
+    get:
+      operationId: getCurrentUser
+      tags: [auth]
+      summary: Get current authenticated user
+      responses:
+        "200":
+          description: Current user info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Unauthorized
+
+  /auth/change-password:
+    post:
+      operationId: changePassword
+      tags: [auth]
+      summary: Change current user password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordInput"
+      responses:
+        "200":
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          description: Bad request
+        "401":
+          description: Unauthorized
+
+  # Users (staff/admin management)
+  /users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      summary: List all staff users
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+        - name: isActive
+          in: query
+          schema:
+            type: boolean
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserListResponse"
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden
+    post:
+      operationId: createUser
+      tags: [users]
+      summary: Create a new staff user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserInput"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Bad request
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden
+        "409":
+          description: Username already exists
+
+  /users/{id}:
+    get:
+      operationId: getUser
+      tags: [users]
+      summary: Get a staff user by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: User details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateUser
+      tags: [users]
+      summary: Update a staff user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserUpdate"
+      responses:
+        "200":
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Bad request
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteUser
+      tags: [users]
+      summary: Deactivate/delete a staff user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: User deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Not found
+
+  /users/{id}/reset-password:
+    post:
+      operationId: resetUserPassword
+      tags: [users]
+      summary: Admin reset of user password
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordInput"
+      responses:
+        "200":
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Not found
+
+  # Patients
+  /patients:
+    get:
+      operationId: listPatients
+      tags: [patients]
+      summary: List patient records
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: List of patients
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PatientListResponse"
+        "401":
+          description: Unauthorized
+    post:
+      operationId: createPatient
+      tags: [patients]
+      summary: Create a new patient record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatientInput"
+      responses:
+        "201":
+          description: Patient created with access code
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Patient"
+        "400":
+          description: Bad request
+        "409":
+          description: Patient ID already exists
+
+  /patients/{id}:
+    get:
+      operationId: getPatient
+      tags: [patients]
+      summary: Get patient record by internal ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Patient record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Patient"
+        "404":
+          description: Not found
+    patch:
+      operationId: updatePatient
+      tags: [patients]
+      summary: Update patient record
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatientUpdate"
+      responses:
+        "200":
+          description: Patient updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Patient"
+        "400":
+          description: Bad request
+        "404":
+          description: Not found
+    delete:
+      operationId: deletePatient
+      tags: [patients]
+      summary: Delete patient record
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Patient deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Not found
+
+  /patients/{id}/regenerate-access-code:
+    post:
+      operationId: regenerateAccessCode
+      tags: [patients]
+      summary: Regenerate patient access code
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: New access code generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Patient"
+        "404":
+          description: Not found
+
+  /patients/{id}/results:
+    get:
+      operationId: listPatientResultsStaff
+      tags: [patients]
+      summary: Get all results for a patient (staff view)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Patient results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Result"
+        "404":
+          description: Not found
+
+  # Results
+  /results:
+    get:
+      operationId: listResults
+      tags: [results]
+      summary: List all results
+      parameters:
+        - name: patientId
+          in: query
+          schema:
+            type: integer
+        - name: category
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: uploadedBy
+          in: query
+          schema:
+            type: integer
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: List of results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResultListResponse"
+        "401":
+          description: Unauthorized
+
+  /results/upload:
+    post:
+      operationId: uploadResult
+      tags: [results]
+      summary: Upload a diagnostic result file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ResultUploadInput"
+      responses:
+        "201":
+          description: Result uploaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "400":
+          description: Bad request (invalid file type or size)
+        "401":
+          description: Unauthorized
+
+  /results/{id}:
+    get:
+      operationId: getResult
+      tags: [results]
+      summary: Get result details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Result details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateResult
+      tags: [results]
+      summary: Update result metadata
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResultUpdate"
+      responses:
+        "200":
+          description: Result updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "400":
+          description: Bad request
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteResult
+      tags: [results]
+      summary: Delete a result
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Result deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "404":
+          description: Not found
+
+  /results/{id}/release:
+    post:
+      operationId: releaseResult
+      tags: [results]
+      summary: Release a result to patient
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseResultInput"
+      responses:
+        "200":
+          description: Result released
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "404":
+          description: Not found
+
+  /results/{id}/download:
+    get:
+      operationId: getResultDownloadUrl
+      tags: [results]
+      summary: Get signed download URL for a result (staff/physician)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Signed download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadUrlResponse"
+        "404":
+          description: Not found
+
+  # Patient Portal
+  /portal/verify:
+    post:
+      operationId: verifyPatientAccess
+      tags: [patient-portal]
+      summary: Verify patient identity to access results
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatientAccessVerification"
+      responses:
+        "200":
+          description: Access granted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PatientPortalSession"
+        "400":
+          description: Bad request
+        "401":
+          description: Access denied (wrong credentials)
+        "403":
+          description: Too many failed attempts
+
+  /portal/results:
+    get:
+      operationId: getPortalResults
+      tags: [patient-portal]
+      summary: Get released results for authenticated patient
+      responses:
+        "200":
+          description: Patient released results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PortalResult"
+        "401":
+          description: Not authenticated
+
+  /portal/results/{id}/download:
+    get:
+      operationId: getPortalResultDownloadUrl
+      tags: [patient-portal]
+      summary: Get signed download URL for patient (portal)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Signed download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadUrlResponse"
+        "401":
+          description: Not authenticated
+        "403":
+          description: Not authorized to access this result
+        "404":
+          description: Not found
+
+  /portal/logout:
+    post:
+      operationId: patientPortalLogout
+      tags: [patient-portal]
+      summary: Patient portal logout
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+
+  # Physician Portal
+  /physician/search:
+    get:
+      operationId: physicianSearchPatient
+      tags: [physician-portal]
+      summary: Physician searches for a patient by ID
+      parameters:
+        - name: patientId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Patient found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhysicianPatientView"
+        "404":
+          description: Patient not found
+        "401":
+          description: Unauthorized
+
+  /physician/patients/{id}/results:
+    get:
+      operationId: listPatientResultsPhysician
+      tags: [physician-portal]
+      summary: Physician views patient results
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Patient results for physician
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Result"
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not found
+
+  /physician/results/{id}/download:
+    get:
+      operationId: physicianGetResultDownloadUrl
+      tags: [physician-portal]
+      summary: Physician gets signed download URL
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Signed download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadUrlResponse"
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not found
+
+  # Audit Logs
+  /audit-logs:
+    get:
+      operationId: listAuditLogs
+      tags: [audit]
+      summary: List audit log entries
+      parameters:
+        - name: userId
+          in: query
+          schema:
+            type: integer
+        - name: patientId
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogListResponse"
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden
+
+  # Dashboard
+  /dashboard/stats:
+    get:
+      operationId: getDashboardStats
+      tags: [dashboard]
+      summary: Get dashboard summary statistics
+      responses:
+        "200":
+          description: Dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+        "401":
+          description: Unauthorized
+
+  /dashboard/uploads-by-department:
+    get:
+      operationId: getUploadsByDepartment
+      tags: [dashboard]
+      summary: Get upload counts grouped by department/category
+      responses:
+        "200":
+          description: Uploads by department
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DepartmentUploadCount"
+        "401":
+          description: Unauthorized
+
+  /dashboard/recent-activity:
+    get:
+      operationId: getRecentActivity
+      tags: [dashboard]
+      summary: Get recent upload and audit activity
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Recent activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditLog"
+        "401":
+          description: Unauthorized
+
+  /dashboard/daily-uploads:
+    get:
+      operationId: getDailyUploads
+      tags: [dashboard]
+      summary: Get daily upload counts for the last 30 days
+      responses:
+        "200":
+          description: Daily upload counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DailyUploadCount"
+        "401":
+          description: Unauthorized
+
+  /dashboard/top-users:
+    get:
+      operationId: getTopActiveUsers
+      tags: [dashboard]
+      summary: Get most active uploading users
+      responses:
+        "200":
+          description: Top active users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserActivityStat"
+        "401":
+          description: Unauthorized
+
+  # Archived Records
+  /archive:
+    get:
+      operationId: listArchivedResults
+      tags: [archive]
+      summary: List archived results
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Archived results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArchiveListResponse"
+        "401":
+          description: Unauthorized
+
+  /archive/{id}/restore:
+    post:
+      operationId: restoreArchivedResult
+      tags: [archive]
+      summary: Restore an archived result to active
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Result restored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "404":
+          description: Not found
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +1007,539 @@ components:
       required:
         - status
 
+    MessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    DownloadUrlResponse:
+      type: object
+      required: [url, expiresAt]
+      properties:
+        url:
+          type: string
+        expiresAt:
+          type: string
+
+    # Auth schemas
+    LoginCredentials:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    RefreshTokenInput:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+
+    AuthResponse:
+      type: object
+      required: [accessToken, refreshToken, user]
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        user:
+          $ref: "#/components/schemas/User"
+
+    ChangePasswordInput:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+          minLength: 8
+
+    ResetPasswordInput:
+      type: object
+      required: [newPassword]
+      properties:
+        newPassword:
+          type: string
+          minLength: 8
+
+    # User schemas
+    User:
+      type: object
+      required: [id, username, firstName, lastName, role, isActive, createdAt]
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: ["string", "null"]
+        role:
+          type: string
+          enum: [super_admin, medical_records, laboratory, radiology, physician]
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+        lastLoginAt:
+          type: ["string", "null"]
+
+    UserInput:
+      type: object
+      required: [username, password, firstName, lastName, role]
+      properties:
+        username:
+          type: string
+          minLength: 3
+        password:
+          type: string
+          minLength: 8
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+          enum: [super_admin, medical_records, laboratory, radiology, physician]
+
+    UserUpdate:
+      type: object
+      properties:
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: ["string", "null"]
+        role:
+          type: string
+          enum: [super_admin, medical_records, laboratory, radiology, physician]
+        isActive:
+          type: boolean
+
+    UserListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # Patient schemas
+    Patient:
+      type: object
+      required: [id, patientHisId, lastName, firstName, dateOfBirth, accessCode, createdAt]
+      properties:
+        id:
+          type: integer
+        patientHisId:
+          type: string
+        lastName:
+          type: string
+        firstName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+        dateOfBirth:
+          type: string
+        mobileNumber:
+          type: ["string", "null"]
+        email:
+          type: ["string", "null"]
+        accessCode:
+          type: string
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+        resultCount:
+          type: integer
+
+    PatientInput:
+      type: object
+      required: [patientHisId, lastName, firstName, dateOfBirth]
+      properties:
+        patientHisId:
+          type: string
+        lastName:
+          type: string
+        firstName:
+          type: string
+        middleName:
+          type: string
+        dateOfBirth:
+          type: string
+        mobileNumber:
+          type: string
+        email:
+          type: string
+
+    PatientUpdate:
+      type: object
+      properties:
+        lastName:
+          type: string
+        firstName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+        dateOfBirth:
+          type: string
+        mobileNumber:
+          type: ["string", "null"]
+        email:
+          type: ["string", "null"]
+
+    PatientListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Patient"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # Result schemas
+    Result:
+      type: object
+      required: [id, patientId, category, fileName, fileType, releaseOption, status, uploadedById, uploadedAt, createdAt]
+      properties:
+        id:
+          type: integer
+        patientId:
+          type: integer
+        patientHisId:
+          type: string
+        patientName:
+          type: string
+        category:
+          type: string
+          enum: [laboratory, radiology, ultrasound, ct_scan, mri, ecg, echo_2d, rehabilitation, other]
+        fileName:
+          type: string
+        originalFileName:
+          type: string
+        fileType:
+          type: string
+          enum: [pdf, jpeg, png]
+        fileSizeBytes:
+          type: integer
+        releaseOption:
+          type: string
+          enum: [immediate, after_physician_review, scheduled]
+        scheduledReleaseDate:
+          type: ["string", "null"]
+        dateReleased:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [pending, released, archived]
+        remarks:
+          type: ["string", "null"]
+        uploadedById:
+          type: integer
+        uploadedByName:
+          type: string
+        uploadedAt:
+          type: string
+        createdAt:
+          type: string
+
+    ResultUploadInput:
+      type: object
+      required: [patientId, category, releaseOption]
+      properties:
+        patientId:
+          type: integer
+        category:
+          type: string
+          enum: [laboratory, radiology, ultrasound, ct_scan, mri, ecg, echo_2d, rehabilitation, other]
+        releaseOption:
+          type: string
+          enum: [immediate, after_physician_review, scheduled]
+        scheduledReleaseDate:
+          type: string
+        remarks:
+          type: string
+
+    ResultUpdate:
+      type: object
+      properties:
+        category:
+          type: string
+          enum: [laboratory, radiology, ultrasound, ct_scan, mri, ecg, echo_2d, rehabilitation, other]
+        releaseOption:
+          type: string
+          enum: [immediate, after_physician_review, scheduled]
+        scheduledReleaseDate:
+          type: ["string", "null"]
+        remarks:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [pending, released, archived]
+
+    ReleaseResultInput:
+      type: object
+      required: [releaseOption]
+      properties:
+        releaseOption:
+          type: string
+          enum: [immediate, after_physician_review, scheduled]
+        scheduledReleaseDate:
+          type: ["string", "null"]
+
+    ResultListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Result"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # Patient Portal schemas
+    PatientAccessVerification:
+      type: object
+      required: [patientHisId, lastName, accessCode]
+      properties:
+        patientHisId:
+          type: string
+        lastName:
+          type: string
+        accessCode:
+          type: string
+
+    PatientPortalSession:
+      type: object
+      required: [sessionToken, patient]
+      properties:
+        sessionToken:
+          type: string
+        patient:
+          $ref: "#/components/schemas/PatientPublicInfo"
+
+    PatientPublicInfo:
+      type: object
+      required: [id, patientHisId, firstName, lastName]
+      properties:
+        id:
+          type: integer
+        patientHisId:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+
+    PortalResult:
+      type: object
+      required: [id, category, originalFileName, fileType, status, uploadedAt, dateReleased]
+      properties:
+        id:
+          type: integer
+        category:
+          type: string
+        originalFileName:
+          type: string
+        fileType:
+          type: string
+        fileSizeBytes:
+          type: integer
+        status:
+          type: string
+        remarks:
+          type: ["string", "null"]
+        uploadedAt:
+          type: string
+        dateReleased:
+          type: ["string", "null"]
+
+    # Physician Portal schemas
+    PhysicianPatientView:
+      type: object
+      required: [id, patientHisId, firstName, lastName, dateOfBirth, resultCount]
+      properties:
+        id:
+          type: integer
+        patientHisId:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+        dateOfBirth:
+          type: string
+        resultCount:
+          type: integer
+
+    # Audit Log schemas
+    AuditLog:
+      type: object
+      required: [id, action, userId, userName, ipAddress, createdAt]
+      properties:
+        id:
+          type: integer
+        action:
+          type: string
+          enum: [login, logout, upload, edit, delete, view, download, access_denied, access_code_regen]
+        userId:
+          type: ["integer", "null"]
+        userName:
+          type: ["string", "null"]
+        patientHisId:
+          type: ["string", "null"]
+        resultId:
+          type: ["integer", "null"]
+        ipAddress:
+          type: string
+        details:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    AuditLogListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLog"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # Dashboard schemas
+    DashboardStats:
+      type: object
+      required: [totalPatients, totalResults, totalReleased, totalPending, totalDownloads, totalStaffUsers, totalPhysicians]
+      properties:
+        totalPatients:
+          type: integer
+        totalResults:
+          type: integer
+        totalReleased:
+          type: integer
+        totalPending:
+          type: integer
+        totalDownloads:
+          type: integer
+        totalStaffUsers:
+          type: integer
+        totalPhysicians:
+          type: integer
+        uploadsToday:
+          type: integer
+        uploadsThisMonth:
+          type: integer
+
+    DepartmentUploadCount:
+      type: object
+      required: [category, count]
+      properties:
+        category:
+          type: string
+        count:
+          type: integer
+
+    DailyUploadCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+        count:
+          type: integer
+
+    UserActivityStat:
+      type: object
+      required: [userId, userName, role, uploadCount]
+      properties:
+        userId:
+          type: integer
+        userName:
+          type: string
+        role:
+          type: string
+        uploadCount:
+          type: integer
+
+    # Archive schemas
+    ArchivedResult:
+      type: object
+      required: [id, patientId, patientHisId, category, originalFileName, fileType, archivedAt, originalUploadedAt]
+      properties:
+        id:
+          type: integer
+        patientId:
+          type: integer
+        patientHisId:
+          type: string
+        patientName:
+          type: string
+        category:
+          type: string
+        originalFileName:
+          type: string
+        fileType:
+          type: string
+        archivedAt:
+          type: string
+        originalUploadedAt:
+          type: string
+        remarks:
+          type: ["string", "null"]
+
+    ArchiveListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArchivedResult"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer

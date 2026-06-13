@@ -1,0 +1,2 @@
+- [ACE Results Portal — mutation hook patterns](ace-portal-hooks.md) — all generated mutations wrap body in `{ data: ... }`; archive via PATCH with `{ data: { status: "archived" } }`.
+- [ACE Results Portal — codegen & Vite restart](ace-portal-codegen.md) — after running codegen (which cleans output), Vite must be restarted or it fails to resolve the regenerated files.
