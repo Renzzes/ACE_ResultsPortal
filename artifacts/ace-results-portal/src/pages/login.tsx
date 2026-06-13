@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useLocation, Link } from "wouter";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -24,10 +23,7 @@ export default function Login() {
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
-    defaultValues: {
-      username: "",
-      password: "",
-    },
+    defaultValues: { username: "", password: "" },
   });
 
   function onSubmit(values: z.infer<typeof formSchema>) {
@@ -36,81 +32,90 @@ export default function Login() {
       {
         onSuccess: (data) => {
           setAuth(data.user, data.accessToken, data.refreshToken);
-          if (data.user.role === "physician") {
-            setLocation("/physician/search");
-          } else {
-            setLocation("/dashboard");
-          }
+          setLocation(data.user.role === "physician" ? "/physician/search" : "/dashboard");
         },
         onError: () => {
-          toast({
-            title: "Login Failed",
-            description: "Invalid credentials. Please try again.",
-            variant: "destructive",
-          });
+          toast({ title: "Login Failed", description: "Invalid credentials. Please try again.", variant: "destructive" });
         },
       }
     );
   }
 
   return (
-    <div className="min-h-screen flex">
-      <div className="flex-1 flex items-center justify-center p-8 bg-background">
-        <div className="w-full max-w-sm space-y-8">
-          <div className="text-center">
-            <div className="w-20 h-20 rounded-2xl overflow-hidden mx-auto mb-6 bg-white border border-border flex items-center justify-center">
-              <img src={aceLogo} alt="ACE Medical Center" className="w-full h-full object-contain" />
-            </div>
-            <h1 className="text-3xl font-bold tracking-tight text-primary">ACE Staff Portal</h1>
-            <p className="text-muted-foreground mt-2">Secure access for hospital personnel</p>
+    <div className="min-h-screen flex flex-col bg-gray-50">
+
+      {/* ── Green branding strip ───────────────────────────────── */}
+      <div className="bg-[#1a5c2a] flex flex-col items-center pt-10 pb-8 px-6 text-center text-white">
+        <div className="w-20 h-20 rounded-full bg-white flex items-center justify-center shadow-lg ring-4 ring-white/20 mb-3">
+          <img src={aceLogo} alt="ACE Medical Center" className="w-[72px] h-[72px] object-contain rounded-full" />
+        </div>
+        <h1 className="text-lg font-extrabold tracking-wide uppercase">Allied Care Experts</h1>
+        <p className="text-xs font-semibold tracking-widest text-green-200 uppercase mt-0.5">Medical Center · Cebu</p>
+      </div>
+
+      {/* ── Login form ─────────────────────────────────────────── */}
+      <div className="flex-1 flex flex-col justify-center px-5 py-8">
+        <div className="w-full max-w-sm mx-auto space-y-6">
+
+          <div className="text-center space-y-0.5">
+            <h2 className="text-lg font-bold text-gray-800">Staff Sign In</h2>
+            <p className="text-sm text-gray-500">Secure access for hospital personnel</p>
           </div>
 
-          <Form {...form}>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
-              <FormField
-                control={form.control}
-                name="username"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Username</FormLabel>
-                    <FormControl>
-                      <Input placeholder="Enter username" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Password</FormLabel>
-                    <FormControl>
-                      <Input type="password" placeholder="Enter password" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <Button type="submit" className="w-full" disabled={loginMutation.isPending}>
-                {loginMutation.isPending ? "Authenticating..." : "Sign In"}
-              </Button>
-            </form>
-          </Form>
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-6">
+            <Form {...form}>
+              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5">
+                <FormField
+                  control={form.control}
+                  name="username"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="text-gray-700">Username</FormLabel>
+                      <FormControl>
+                        <Input placeholder="Enter username" className="h-11" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="password"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="text-gray-700">Password</FormLabel>
+                      <FormControl>
+                        <Input type="password" placeholder="Enter password" className="h-11" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <Button
+                  type="submit"
+                  className="w-full h-11 bg-[#1a5c2a] hover:bg-[#155224] text-white font-semibold rounded-xl"
+                  disabled={loginMutation.isPending}
+                >
+                  {loginMutation.isPending ? "Signing in…" : "Sign In"}
+                </Button>
+              </form>
+            </Form>
+          </div>
 
-          <div className="text-center pt-6 border-t">
-            <p className="text-sm text-muted-foreground">
+          <div className="text-center border-t border-gray-200 pt-5">
+            <p className="text-sm text-gray-500">
               Are you a patient?{" "}
-              <Link href="/portal" className="text-secondary font-medium hover:underline">
+              <Link href="/portal" className="text-[#1a5c2a] font-semibold hover:underline">
                 Access Patient Portal
+              </Link>
+            </p>
+            <p className="text-sm text-gray-500 mt-2">
+              <Link href="/" className="text-gray-400 hover:text-gray-600 text-xs">
+                ← Back to Home
               </Link>
             </p>
           </div>
         </div>
-      </div>
-      <div className="hidden lg:block lg:flex-1 bg-primary relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary to-primary/80 opacity-90" />
       </div>
     </div>
   );
