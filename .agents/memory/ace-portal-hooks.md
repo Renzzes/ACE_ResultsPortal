@@ -16,6 +16,17 @@ changePassword.mutate({ data: { currentPassword, newPassword } })
 
 ID-only mutations (delete, regenerate, restore) take `{ id }` directly with no `data` wrapper.
 
+## Auth token wiring — CRITICAL
+`setAuthTokenGetter` from `@workspace/api-client-react` MUST be called once at app startup (in App.tsx, before any component renders) so that the custom fetch attaches `Authorization: Bearer <token>` to every request. Without it, every API call returns 401.
+
+```ts
+// App.tsx — top level, outside any component
+import { setAuthTokenGetter } from "@workspace/api-client-react";
+setAuthTokenGetter(() => localStorage.getItem("ace_access_token"));
+```
+
+The comment in custom-fetch.ts says "should never be used in web apps where session cookies are used" — that comment is misleading for this JWT-based setup. **Always wire it for this project.**
+
 ## Archive support
 `ResultUpdate` schema now includes `status: enum [pending, released, archived]`.
 Backend PATCH `/api/results/:id` applies `status` from `parsed.data.status`.

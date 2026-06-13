@@ -3,6 +3,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { setAuthTokenGetter } from "@workspace/api-client-react";
+
+// Wire the token getter once — reads the stored token before every API call
+setAuthTokenGetter(() => localStorage.getItem("ace_access_token"));
 
 import Login from "@/pages/login";
 import Dashboard from "@/pages/dashboard";
