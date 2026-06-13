@@ -65,7 +65,7 @@ function ResultActionButtons({ resultId }: { resultId: number }) {
         className="text-blue-600 hover:text-blue-700 hover:bg-blue-50"
       >
         <Eye className="w-4 h-4" />
-        <span className="ml-1 text-xs hidden sm:inline">View</span>
+        <span className="ml-1 text-xs">View</span>
       </Button>
       <Button
         size="sm" variant="ghost"
@@ -75,7 +75,7 @@ function ResultActionButtons({ resultId }: { resultId: number }) {
         className="text-gray-600 hover:text-gray-700"
       >
         <Download className="w-4 h-4" />
-        <span className="ml-1 text-xs hidden sm:inline">Download</span>
+        <span className="ml-1 text-xs">Download</span>
       </Button>
     </div>
   );
@@ -206,7 +206,7 @@ export default function PhysicianSearchPage() {
                   </div>
                 </div>
 
-                {/* Results table */}
+                {/* Results list */}
                 <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
                   <div className="px-4 py-3 border-b border-border bg-muted/30">
                     <h3 className="font-semibold">Diagnostic Results</h3>
@@ -216,43 +216,34 @@ export default function PhysicianSearchPage() {
                   ) : resultList.length === 0 ? (
                     <div className="p-10 text-center text-muted-foreground">No released results on file for this patient.</div>
                   ) : (
-                    <table className="w-full text-sm">
-                      <thead className="bg-muted/50 border-b border-border">
-                        <tr>
-                          <th className="text-left px-4 py-3 font-medium text-muted-foreground">Category</th>
-                          <th className="text-left px-4 py-3 font-medium text-muted-foreground">File</th>
-                          <th className="text-left px-4 py-3 font-medium text-muted-foreground">Status</th>
-                          <th className="text-left px-4 py-3 font-medium text-muted-foreground">Date</th>
-                          <th className="text-right px-4 py-3 font-medium text-muted-foreground">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-border">
-                        {resultList.map((r) => (
-                          <tr key={r.id} className="hover:bg-muted/30 transition-colors">
-                            <td className="px-4 py-3">
-                              <span className={`text-xs font-medium px-2 py-1 rounded-full ${CATEGORY_COLORS[r.category] ?? "bg-gray-100 text-gray-700"}`}>
-                                {CATEGORY_LABELS[r.category] ?? r.category}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <p className="truncate max-w-[180px]">{r.originalFileName}</p>
+                    <ul className="divide-y divide-border">
+                      {resultList.map((r) => (
+                        <li key={r.id} className="px-4 py-3 hover:bg-muted/30 transition-colors">
+                          {/* Top row: category badge + filename */}
+                          <div className="flex items-start gap-2 mb-2">
+                            <span className={`text-xs font-medium px-2 py-1 rounded-full flex-shrink-0 ${CATEGORY_COLORS[r.category] ?? "bg-gray-100 text-gray-700"}`}>
+                              {CATEGORY_LABELS[r.category] ?? r.category}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium truncate">{r.originalFileName}</p>
                               <p className="text-xs text-muted-foreground uppercase">{r.fileType}</p>
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${STATUS_CLASSES[r.status] ?? ""}`}>
+                            </div>
+                          </div>
+                          {/* Bottom row: status + date + actions */}
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className={`text-xs font-medium px-2 py-0.5 rounded-full capitalize ${STATUS_CLASSES[r.status] ?? ""}`}>
                                 {r.status}
                               </span>
-                            </td>
-                            <td className="px-4 py-3 text-muted-foreground">
-                              {new Date(r.uploadedAt).toLocaleDateString("en-PH")}
-                            </td>
-                            <td className="px-4 py-3">
-                              <ResultActionButtons resultId={r.id} />
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                              <span className="text-xs text-muted-foreground">
+                                {new Date(r.uploadedAt).toLocaleDateString("en-PH")}
+                              </span>
+                            </div>
+                            <ResultActionButtons resultId={r.id} />
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               </div>
