@@ -741,14 +741,9 @@ paths:
       tags: [physician-portal]
       summary: Physician searches for a patient by HIS ID or last name
       parameters:
-        - name: patientId
+        - name: q
           in: query
-          required: false
-          schema:
-            type: string
-        - name: lastName
-          in: query
-          required: false
+          required: true
           schema:
             type: string
       responses:

@@ -649,8 +649,7 @@ export const PatientPortalLogoutResponse = zod.object({
  * @summary Physician searches for a patient by HIS ID or last name
  */
 export const PhysicianSearchPatientQueryParams = zod.object({
-  "patientId": zod.coerce.string().optional(),
-  "lastName": zod.coerce.string().optional()
+  "q": zod.coerce.string()
 })
 
 export const PhysicianSearchPatientResponse = zod.object({

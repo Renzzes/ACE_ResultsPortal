@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, ilike, and } from "drizzle-orm";
+import { eq, ilike, and, or } from "drizzle-orm";
 import { db, patientsTable, resultsTable, patientPhysiciansTable } from "@workspace/db";
 import {
   PhysicianSearchPatientQueryParams,
@@ -24,20 +24,22 @@ router.get("/physician/search", requireAuth, requireRole(...physicianRoles), asy
     return;
   }
 
-  const { patientId, lastName } = params.data as { patientId?: string; lastName?: string };
+  const { q } = params.data as { q?: string };
+  const term = q?.trim();
 
-  if (!patientId && !lastName) {
-    res.status(400).json({ error: "Provide patientId or lastName to search" });
+  if (!term) {
+    res.status(400).json({ error: "Provide a search term" });
     return;
   }
 
   const isPhysician = req.user!.role === "physician";
   const physicianUserId = req.user!.userId;
 
-  // Build base query conditions
-  const conditions = patientId
-    ? ilike(patientsTable.patientHisId, `%${patientId}%`)
-    : ilike(patientsTable.lastName, `%${lastName}%`);
+  // Match either HIS ID or last name with a single search term
+  const conditions = or(
+    ilike(patientsTable.patientHisId, `%${term}%`),
+    ilike(patientsTable.lastName, `%${term}%`),
+  );
 
   let patients;
 
@@ -68,6 +70,12 @@ router.get("/physician/search", requireAuth, requireRole(...physicianRoles), asy
   if (patients.length === 0) {
     res.status(404).json({ error: "No matching patient found" });
     return;
+  }
+
+  // Exact HIS ID match takes precedence — collapse to single result
+  const exact = patients.find((p) => p.patientHisId.toLowerCase() === term.toLowerCase());
+  if (exact) {
+    patients = [exact];
   }
 
   await logAudit({
@@ -219,7 +227,7 @@ router.get("/physician/results/:id/download", requireAuth, requireRole(...physic
     }
   }
 
-  const token = signDownloadToken(result.id, "physician");
+  const token = signDownloadToken(result.id, "physician", req.user!.userId);
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
   await logAudit({
@@ -242,17 +250,40 @@ router.get("/physician/file/:token", async (req, res): Promise<void> => {
   const { inline } = req.query as { inline?: string };
   const payload = verifyToken(token);
 
-  if (!payload || payload["type"] !== "download") {
+  // Enforce token type AND audience — a physician file link must be a physician-scoped download token
+  if (!payload || payload["type"] !== "download" || payload["forType"] !== "physician") {
     res.status(401).json({ error: "Invalid or expired download link" });
     return;
   }
 
   const resultId = payload["resultId"] as number;
+  const subjectId = payload["subjectId"] as number | undefined;
   const [result] = await db.select().from(resultsTable).where(eq(resultsTable.id, resultId));
 
   if (!result) {
     res.status(404).json({ error: "Result not found" });
     return;
+  }
+
+  // Re-validate at serve time: result must still be released and still assigned to the token's physician
+  if (result.status !== "released") {
+    res.status(403).json({ error: "Result is not released" });
+    return;
+  }
+  if (subjectId !== undefined) {
+    const [assignment] = await db
+      .select()
+      .from(patientPhysiciansTable)
+      .where(
+        and(
+          eq(patientPhysiciansTable.patientId, result.patientId),
+          eq(patientPhysiciansTable.physicianId, subjectId)
+        )
+      );
+    if (!assignment) {
+      res.status(403).json({ error: "Patient is not assigned to you" });
+      return;
+    }
   }
 
   const filePath = getFilePath(result.fileName);

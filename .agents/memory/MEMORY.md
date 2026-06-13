@@ -1,3 +1,4 @@
 - [ACE Results Portal — mutation hook patterns](ace-portal-hooks.md) — all generated mutations wrap body in `{ data: ... }`; archive via PATCH with `{ data: { status: "archived" } }`.
 - [ACE Results Portal — codegen & Vite restart](ace-portal-codegen.md) — after running codegen (which cleans output), Vite must be restarted or it fails to resolve the regenerated files.
 - [ACE Results Portal — auth token refresh](ace-portal-auth-refresh.md) — 15m access token; all staff calls must use customFetch (auto-refreshes on 401), never raw fetch with Bearer.
+- [ACE Results Portal — download token audience](ace-portal-download-tokens.md) — file-download JWTs carry forType (+subjectId); each /file/:token route must verify its own audience and re-check release/assignment at serve time.

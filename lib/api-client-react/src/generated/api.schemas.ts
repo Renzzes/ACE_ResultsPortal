@@ -488,8 +488,7 @@ limit?: number;
 };
 
 export type PhysicianSearchPatientParams = {
-patientId?: string;
-lastName?: string;
+q: string;
 };
 
 export type ListAuditLogsParams = {

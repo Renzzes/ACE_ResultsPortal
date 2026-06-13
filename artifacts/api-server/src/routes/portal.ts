@@ -144,7 +144,7 @@ router.get("/portal/file/:token", async (req, res): Promise<void> => {
   const { token } = req.params as { token: string };
   const payload = verifyToken(token);
 
-  if (!payload || payload["type"] !== "download") {
+  if (!payload || payload["type"] !== "download" || payload["forType"] !== "portal") {
     res.status(401).json({ error: "Invalid or expired download link" });
     return;
   }

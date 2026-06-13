@@ -34,8 +34,6 @@ const STATUS_CLASSES: Record<string, string> = {
   archived: "bg-slate-100 text-slate-600",
 };
 
-type SearchMode = "hisId" | "lastName";
-
 function ResultActionButtons({ resultId }: { resultId: number }) {
   const [action, setAction] = useState<"view" | "download" | null>(null);
   const { data, isFetching } = usePhysicianGetResultDownloadUrl(
@@ -85,24 +83,19 @@ function ResultActionButtons({ resultId }: { resultId: number }) {
 
 export default function PhysicianSearchPage() {
   const { auth } = useAuth();
-  const [mode, setMode] = useState<SearchMode>("hisId");
   const [query, setQuery] = useState("");
-  const [submitted, setSubmitted] = useState<{ mode: SearchMode; value: string } | null>(null);
+  const [submitted, setSubmitted] = useState<string | null>(null);
   const [selectedPatientId, setSelectedPatientId] = useState<number | null>(null);
 
   if (!auth.user || !["physician", "super_admin"].includes(auth.user.role)) {
     return <Redirect to="/login" />;
   }
 
-  const searchParams = submitted
-    ? submitted.mode === "hisId"
-      ? { patientId: submitted.value }
-      : { lastName: submitted.value }
-    : { patientId: "" };
+  const searchParams = { q: submitted ?? "" };
 
   const { data: searchResult, isLoading: loadingPatient, isError } = usePhysicianSearchPatient(
-    searchParams as { patientId: string },
-    { query: { queryKey: getPhysicianSearchPatientQueryKey(searchParams as { patientId: string }), enabled: !!submitted } }
+    searchParams,
+    { query: { queryKey: getPhysicianSearchPatientQueryKey(searchParams), enabled: !!submitted } }
   );
 
   // Handle both single patient (object) and multiple patients (array)
@@ -122,7 +115,7 @@ export default function PhysicianSearchPage() {
     const trimmed = query.trim();
     if (!trimmed) return;
     setSelectedPatientId(null);
-    setSubmitted({ mode, value: trimmed });
+    setSubmitted(trimmed);
   };
 
   const resultList = Array.isArray(results) ? results : [];
@@ -138,31 +131,13 @@ export default function PhysicianSearchPage() {
           <p className="text-muted-foreground">Search for your assigned patients by HIS ID or last name</p>
         </div>
 
-        {/* Search mode tabs */}
-        <div className="flex gap-1 bg-muted rounded-lg p-1 w-fit">
-          <button
-            type="button"
-            onClick={() => { setMode("hisId"); setQuery(""); setSubmitted(null); setSelectedPatientId(null); }}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${mode === "hisId" ? "bg-background shadow text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-          >
-            HIS ID
-          </button>
-          <button
-            type="button"
-            onClick={() => { setMode("lastName"); setQuery(""); setSubmitted(null); setSelectedPatientId(null); }}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${mode === "lastName" ? "bg-background shadow text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-          >
-            Last Name
-          </button>
-        </div>
-
         {/* Search form */}
         <form onSubmit={handleSearch} className="flex gap-3 max-w-md">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               className="pl-9"
-              placeholder={mode === "hisId" ? "Enter Patient HIS ID…" : "Enter patient last name…"}
+              placeholder="Search by HIS ID or last name…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -177,7 +152,7 @@ export default function PhysicianSearchPage() {
             {isError && (
               <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
                 <p className="text-sm text-destructive">
-                  No assigned patient found for "{submitted.value}". Only your assigned patients appear in search results.
+                  No assigned patient found for "{submitted}". Only your assigned patients appear in search results.
                 </p>
               </div>
             )}

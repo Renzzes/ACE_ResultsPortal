@@ -7,6 +7,5 @@
  */
 
 export type PhysicianSearchPatientParams = {
-patientId?: string;
-lastName?: string;
+q: string;
 };

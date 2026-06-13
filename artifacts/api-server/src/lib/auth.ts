@@ -32,8 +32,12 @@ export function signPortalToken(payload: Omit<PortalTokenPayload, "type">): stri
   return jwt.sign({ ...payload, type: "portal" }, JWT_SECRET, { expiresIn: PORTAL_TOKEN_EXPIRY });
 }
 
-export function signDownloadToken(resultId: number, forType: "staff" | "portal" | "physician"): string {
-  return jwt.sign({ resultId, forType, type: "download" }, JWT_SECRET, { expiresIn: "5m" });
+export function signDownloadToken(
+  resultId: number,
+  forType: "staff" | "portal" | "physician",
+  subjectId?: number,
+): string {
+  return jwt.sign({ resultId, forType, subjectId, type: "download" }, JWT_SECRET, { expiresIn: "5m" });
 }
 
 export function verifyToken(token: string): jwt.JwtPayload | null {
