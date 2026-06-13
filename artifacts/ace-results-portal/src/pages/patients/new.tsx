@@ -1,12 +1,77 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
-import { useCreatePatient } from "@workspace/api-client-react";
+import { useCreatePatient, useListPatients, getListPatientsQueryKey } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Check, Copy, ArrowLeft } from "lucide-react";
+import { Check, Copy, ArrowLeft, AlertTriangle, Upload, User } from "lucide-react";
+
+interface ExistingPatient {
+  id: number;
+  patientHisId: string;
+  lastName: string;
+  firstName: string;
+}
+
+function DuplicateAlert({ patient, onDismiss }: { patient: ExistingPatient; onDismiss: () => void }) {
+  const [, setLocation] = useLocation();
+  return (
+    <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-5 space-y-4">
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+        <div>
+          <p className="font-semibold text-amber-900">Patient already registered</p>
+          <p className="text-sm text-amber-800 mt-0.5">
+            A record for <span className="font-mono font-semibold">{patient.patientHisId}</span> already exists in the system.
+          </p>
+        </div>
+      </div>
+
+      <div className="bg-white border border-amber-200 rounded-lg px-4 py-3 flex items-center gap-3">
+        <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0">
+          <User className="w-4 h-4 text-amber-700" />
+        </div>
+        <div>
+          <p className="font-semibold text-sm">{patient.lastName}, {patient.firstName}</p>
+          <p className="text-xs text-muted-foreground font-mono">{patient.patientHisId}</p>
+        </div>
+      </div>
+
+      <p className="text-sm text-amber-800">
+        You can upload results to their existing account or view their record:
+      </p>
+
+      <div className="flex gap-2 flex-wrap">
+        <Button
+          size="sm"
+          className="gap-1.5"
+          onClick={() => setLocation(`/results/upload?patientId=${patient.patientHisId}`)}
+        >
+          <Upload className="w-4 h-4" />
+          Upload Result for this Patient
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5"
+          onClick={() => setLocation(`/patients/${patient.id}`)}
+        >
+          <User className="w-4 h-4" />
+          View Patient Record
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onDismiss}
+        >
+          Enter a different ID
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export default function NewPatientPage() {
   const [, setLocation] = useLocation();
@@ -22,8 +87,42 @@ export default function NewPatientPage() {
   });
   const [created, setCreated] = useState<{ accessCode: string; id: number; name: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [existingPatient, setExistingPatient] = useState<ExistingPatient | null>(null);
+  const [hisIdChecked, setHisIdChecked] = useState("");
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const createPatient = useCreatePatient();
+
+  // Live HIS ID duplicate check — debounced 500ms after typing stops
+  const { data: hisIdCheckResult } = useListPatients(
+    { search: hisIdChecked, limit: 1 },
+    {
+      query: {
+        queryKey: [...getListPatientsQueryKey({ search: hisIdChecked, limit: 1 }), "hischeck"],
+        enabled: hisIdChecked.length >= 3,
+      }
+    }
+  );
+
+  useEffect(() => {
+    if (!hisIdChecked || hisIdChecked.length < 3) { setExistingPatient(null); return; }
+    const match = hisIdCheckResult?.data?.find(
+      (p) => p.patientHisId.toLowerCase() === hisIdChecked.toLowerCase()
+    );
+    if (match) {
+      setExistingPatient({ id: match.id, patientHisId: match.patientHisId, lastName: match.lastName, firstName: match.firstName });
+    } else {
+      setExistingPatient(null);
+    }
+  }, [hisIdCheckResult, hisIdChecked]);
+
+  const handleHisIdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setForm(f => ({ ...f, patientHisId: value }));
+    setExistingPatient(null);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setHisIdChecked(value.trim()), 500);
+  };
 
   const field = (k: keyof typeof form) => ({
     value: form[k],
@@ -32,6 +131,7 @@ export default function NewPatientPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (existingPatient) return;
     if (!form.patientHisId || !form.lastName || !form.firstName || !form.dateOfBirth) {
       toast({ title: "Please fill in all required fields", variant: "destructive" });
       return;
@@ -53,7 +153,12 @@ export default function NewPatientPage() {
           setCreated({ accessCode: data.accessCode, id: data.id, name: `${data.firstName} ${data.lastName}` });
         },
         onError: (err: any) => {
-          toast({ title: err?.response?.data?.error ?? "Failed to create patient", variant: "destructive" });
+          const body = err?.response?.data;
+          if (body?.existingPatient) {
+            setExistingPatient(body.existingPatient);
+          } else {
+            toast({ title: body?.error ?? "Failed to create patient", variant: "destructive" });
+          }
         },
       }
     );
@@ -90,9 +195,18 @@ export default function NewPatientPage() {
 
           <div className="flex gap-3">
             <Button className="flex-1" onClick={() => setLocation(`/patients/${created.id}`)}>View Patient</Button>
-            <Button variant="outline" className="flex-1" onClick={() => {
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => setLocation(`/results/upload?patientId=${created.id}`)}
+            >
+              <Upload className="w-4 h-4 mr-1.5" />Upload Result
+            </Button>
+            <Button variant="ghost" onClick={() => {
               setCreated(null);
               setForm({ patientHisId: "", lastName: "", firstName: "", middleName: "", dateOfBirth: "", mobileNumber: "", email: "" });
+              setExistingPatient(null);
+              setHisIdChecked("");
             }}>Add Another</Button>
           </div>
         </div>
@@ -113,11 +227,37 @@ export default function NewPatientPage() {
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="bg-card border border-border rounded-xl p-6 space-y-5 shadow-sm">
+        {/* Duplicate alert — shown inline above the form */}
+        {existingPatient && (
+          <DuplicateAlert
+            patient={existingPatient}
+            onDismiss={() => {
+              setExistingPatient(null);
+              setHisIdChecked("");
+              setForm(f => ({ ...f, patientHisId: "" }));
+            }}
+          />
+        )}
+
+        <form onSubmit={handleSubmit} className={`bg-card border border-border rounded-xl p-6 space-y-5 shadow-sm ${existingPatient ? "opacity-50 pointer-events-none" : ""}`}>
           <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2 space-y-1.5">
               <Label htmlFor="hisId">Patient HIS ID <span className="text-destructive">*</span></Label>
-              <Input id="hisId" placeholder="e.g. ACE-2024-00001" {...field("patientHisId")} />
+              <Input
+                id="hisId"
+                placeholder="e.g. ACE-2024-00001"
+                value={form.patientHisId}
+                onChange={handleHisIdChange}
+                autoComplete="off"
+              />
+              {hisIdChecked.length >= 3 && !existingPatient && !hisIdCheckResult && (
+                <p className="text-xs text-muted-foreground">Checking...</p>
+              )}
+              {hisIdChecked.length >= 3 && !existingPatient && hisIdCheckResult && (
+                <p className="text-xs text-green-600 flex items-center gap-1">
+                  <Check className="w-3 h-3" /> ID available
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="lastName">Last Name <span className="text-destructive">*</span></Label>
@@ -146,7 +286,7 @@ export default function NewPatientPage() {
           </div>
 
           <div className="flex gap-3 pt-2">
-            <Button type="submit" disabled={createPatient.isPending} className="flex-1">
+            <Button type="submit" disabled={createPatient.isPending || !!existingPatient} className="flex-1">
               {createPatient.isPending ? "Registering..." : "Register Patient"}
             </Button>
             <Button type="button" variant="outline" onClick={() => setLocation("/patients")}>Cancel</Button>

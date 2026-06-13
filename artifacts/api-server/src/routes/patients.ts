@@ -105,7 +105,16 @@ router.post("/patients", requireAuth, async (req, res): Promise<void> => {
     .from(patientsTable)
     .where(eq(patientsTable.patientHisId, parsed.data.patientHisId));
   if (existing.length > 0) {
-    res.status(409).json({ error: "Patient ID already exists in the system" });
+    const p = existing[0];
+    res.status(409).json({
+      error: "Patient ID already exists in the system",
+      existingPatient: {
+        id: p.id,
+        patientHisId: p.patientHisId,
+        lastName: p.lastName,
+        firstName: p.firstName,
+      },
+    });
     return;
   }
 
