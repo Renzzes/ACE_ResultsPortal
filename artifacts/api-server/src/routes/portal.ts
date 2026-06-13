@@ -175,8 +175,9 @@ router.get("/portal/file/:token", async (req, res): Promise<void> => {
   res.setHeader("Content-Type", mimeMap[result.fileType] ?? "application/octet-stream");
   res.setHeader(
     "Content-Disposition",
-    `attachment; filename="${encodeURIComponent(result.originalFileName)}"`,
+    `inline; filename="${encodeURIComponent(result.originalFileName)}"`,
   );
+  res.setHeader("Cache-Control", "private, no-store");
 
   const stream = fs.createReadStream(filePath);
   stream.pipe(res);
