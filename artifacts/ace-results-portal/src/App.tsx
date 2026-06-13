@@ -5,8 +5,14 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { setAuthTokenGetter } from "@workspace/api-client-react";
 
-// Wire the token getter once — reads the stored token before every API call
-setAuthTokenGetter(() => localStorage.getItem("ace_access_token"));
+// Wire the token getter once — picks the right token based on the current route:
+// portal pages use the patient session token, everything else uses the staff token.
+setAuthTokenGetter(() => {
+  if (window.location.pathname.includes("/portal")) {
+    return localStorage.getItem("ace_portal_token");
+  }
+  return localStorage.getItem("ace_access_token");
+});
 
 import Login from "@/pages/login";
 import Dashboard from "@/pages/dashboard";
