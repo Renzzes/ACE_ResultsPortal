@@ -8,6 +8,13 @@ export type BodyType<T> = T;
 
 export type AuthTokenGetter = () => Promise<string | null> | string | null;
 
+/**
+ * Invoked when a request receives a 401. If it resolves to `true`, the original
+ * request is retried once (with a freshly fetched auth token). Use this to
+ * silently refresh an expired access token before retrying.
+ */
+export type UnauthorizedHandler = () => Promise<boolean> | boolean;
+
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 
@@ -17,6 +24,7 @@ const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 
 let _baseUrl: string | null = null;
 let _authTokenGetter: AuthTokenGetter | null = null;
+let _unauthorizedHandler: UnauthorizedHandler | null = null;
 
 /**
  * Set a base URL that is prepended to every relative request URL
@@ -42,6 +50,15 @@ export function setBaseUrl(url: string | null): void {
  */
 export function setAuthTokenGetter(getter: AuthTokenGetter | null): void {
   _authTokenGetter = getter;
+}
+
+/**
+ * Register a handler invoked when a request returns 401. If it resolves to
+ * `true`, the request is retried once with a freshly fetched token.
+ * Pass `null` to clear the handler.
+ */
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  _unauthorizedHandler = handler;
 }
 
 function isRequest(input: RequestInfo | URL): input is Request {
@@ -349,18 +366,38 @@ export async function customFetch<T = unknown>(
     headers.set("accept", DEFAULT_JSON_ACCEPT);
   }
 
-  // Attach bearer token when an auth getter is configured and no
-  // Authorization header has been explicitly provided.
-  if (_authTokenGetter && !headers.has("authorization")) {
-    const token = await _authTokenGetter();
-    if (token) {
-      headers.set("authorization", `Bearer ${token}`);
-    }
-  }
-
   const requestInfo = { method, url: resolveUrl(input) };
 
-  const response = await fetch(input, { ...init, method, headers });
+  // Whether the caller explicitly supplied an Authorization header.
+  const hasExplicitAuth = headers.has("authorization");
+
+  // Perform the request, freshly attaching the bearer token each time so a
+  // retry after a token refresh picks up the new token.
+  const performFetch = async (): Promise<Response> => {
+    const finalHeaders = new Headers(headers);
+    if (_authTokenGetter && !hasExplicitAuth) {
+      const token = await _authTokenGetter();
+      if (token) {
+        finalHeaders.set("authorization", `Bearer ${token}`);
+      }
+    }
+    return fetch(input, { ...init, method, headers: finalHeaders });
+  };
+
+  let response = await performFetch();
+
+  // On 401, give the registered handler a chance to refresh the session and
+  // retry the request once.
+  if (
+    response.status === 401 &&
+    _unauthorizedHandler &&
+    !hasExplicitAuth
+  ) {
+    const refreshed = await _unauthorizedHandler();
+    if (refreshed) {
+      response = await performFetch();
+    }
+  }
 
   if (!response.ok) {
     const errorData = await parseErrorBody(response, method);

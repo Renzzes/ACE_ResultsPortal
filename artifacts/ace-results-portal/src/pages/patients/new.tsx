@@ -1,12 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
-import { useCreatePatient, useListPatients, getListPatientsQueryKey } from "@workspace/api-client-react";
+import { useCreatePatient, useListPatients, getListPatientsQueryKey, customFetch } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { useAuth } from "@/lib/auth";
 import { Check, Copy, ArrowLeft, AlertTriangle, Upload, User, Stethoscope, X } from "lucide-react";
 
 interface ExistingPatient { id: number; patientHisId: string; lastName: string; firstName: string }
@@ -50,7 +49,6 @@ function DuplicateAlert({ patient, onDismiss }: { patient: ExistingPatient; onDi
 
 export default function NewPatientPage() {
   const [, setLocation] = useLocation();
-  const { auth } = useAuth();
   const { toast } = useToast();
 
   const [form, setForm] = useState({
@@ -95,13 +93,13 @@ export default function NewPatientPage() {
     if (physicianDebounceRef.current) clearTimeout(physicianDebounceRef.current);
     physicianDebounceRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/physicians?search=${encodeURIComponent(physicianSearch)}`, {
-          headers: { Authorization: `Bearer ${auth.token}` },
-        });
-        if (res.ok) setPhysicianResults(await res.json());
+        const data = await customFetch<Physician[]>(
+          `/api/physicians?search=${encodeURIComponent(physicianSearch)}`,
+        );
+        setPhysicianResults(data);
       } catch {}
     }, 400);
-  }, [physicianSearch, auth.token]);
+  }, [physicianSearch]);
 
   const handleHisIdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;

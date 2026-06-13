@@ -10,6 +10,7 @@ import {
   useGetResultDownloadUrl,
   getGetResultDownloadUrlQueryKey,
   useUpdateResult,
+  customFetch,
 } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
@@ -65,11 +66,9 @@ function DownloadButton({ resultId }: { resultId: number }) {
 function PhysicianSection({
   patientId,
   canManage,
-  token,
 }: {
   patientId: number;
   canManage: boolean;
-  token: string | null;
 }) {
   const { toast } = useToast();
   const [physicians, setPhysicians] = useState<AssignedPhysician[]>([]);
@@ -79,12 +78,12 @@ function PhysicianSection({
   const [showDrop, setShowDrop] = useState(false);
   const [adding, setAdding] = useState(false);
 
-  const headers = { Authorization: `Bearer ${token}` };
-
   const loadPhysicians = async () => {
     try {
-      const res = await fetch(`/api/patients/${patientId}/physicians`, { headers });
-      if (res.ok) setPhysicians(await res.json());
+      const data = await customFetch<AssignedPhysician[]>(`/api/patients/${patientId}/physicians`);
+      setPhysicians(data);
+    } catch {
+      /* ignore — leave list as-is */
     } finally {
       setLoading(false);
     }
@@ -95,8 +94,14 @@ function PhysicianSection({
   useEffect(() => {
     if (!search.trim()) { setSearchResults([]); return; }
     const t = setTimeout(async () => {
-      const res = await fetch(`/api/physicians?search=${encodeURIComponent(search)}`, { headers });
-      if (res.ok) setSearchResults(await res.json());
+      try {
+        const data = await customFetch<PhysicianSearchResult[]>(
+          `/api/physicians?search=${encodeURIComponent(search)}`,
+        );
+        setSearchResults(data);
+      } catch {
+        /* ignore search errors */
+      }
     }, 400);
     return () => clearTimeout(t);
   }, [search]);
@@ -106,32 +111,31 @@ function PhysicianSection({
     setShowDrop(false);
     setSearch("");
     try {
-      const res = await fetch(`/api/patients/${patientId}/physicians`, {
+      await customFetch(`/api/patients/${patientId}/physicians`, {
         method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ physicianId: physician.id }),
       });
-      if (res.ok) {
-        toast({ title: `${physician.name} assigned to patient` });
-        loadPhysicians();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        toast({ title: err.error ?? "Failed to assign physician", variant: "destructive" });
-      }
+      toast({ title: `${physician.name} assigned to patient` });
+      loadPhysicians();
+    } catch (err) {
+      toast({
+        title: err instanceof Error ? err.message : "Failed to assign physician",
+        variant: "destructive",
+      });
     } finally {
       setAdding(false);
     }
   };
 
   const handleRemove = async (physicianId: number, name: string) => {
-    const res = await fetch(`/api/patients/${patientId}/physicians/${physicianId}`, {
-      method: "DELETE",
-      headers,
-    });
-    if (res.ok) {
+    try {
+      await customFetch(`/api/patients/${patientId}/physicians/${physicianId}`, {
+        method: "DELETE",
+      });
       toast({ title: `${name} removed from patient` });
       loadPhysicians();
-    } else {
+    } catch {
       toast({ title: "Failed to remove physician", variant: "destructive" });
     }
   };
@@ -332,7 +336,6 @@ export default function PatientDetailPage() {
         <PhysicianSection
           patientId={patientId}
           canManage={canManagePhysicians}
-          token={auth.token}
         />
 
         {/* Results */}

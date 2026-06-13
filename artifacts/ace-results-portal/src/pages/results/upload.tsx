@@ -3,13 +3,13 @@ import { useLocation, useSearch } from "wouter";
 import {
   useListPatients,
   getListPatientsQueryKey,
+  customFetch,
 } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { useAuth } from "@/lib/auth";
 import { ArrowLeft, Upload, FileText, X } from "lucide-react";
 
 const CATEGORIES = [
@@ -40,7 +40,6 @@ export default function UploadResultPage() {
   const [, setLocation] = useLocation();
   const searchStr = useSearch();
   const prefilledPatientId = new URLSearchParams(searchStr).get("patientId");
-  const { auth } = useAuth();
   const { toast } = useToast();
 
   const [patientSearch, setPatientSearch] = useState("");
@@ -101,19 +100,17 @@ export default function UploadResultPage() {
     formData.append("file", file);
 
     try {
-      const res = await fetch("/api/results/upload", {
+      await customFetch("/api/results/upload", {
         method: "POST",
-        headers: { Authorization: `Bearer ${auth.token}` },
         body: formData,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error ?? "Upload failed");
-      }
       toast({ title: "Result uploaded successfully" });
       setLocation(`/patients/${selectedPatient.id}`);
-    } catch (err: any) {
-      toast({ title: err.message ?? "Upload failed", variant: "destructive" });
+    } catch (err) {
+      toast({
+        title: err instanceof Error ? err.message : "Upload failed",
+        variant: "destructive",
+      });
     } finally {
       setUploading(false);
     }

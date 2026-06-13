@@ -3,15 +3,64 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/lib/auth";
-import { setAuthTokenGetter } from "@workspace/api-client-react";
+import { setAuthTokenGetter, setUnauthorizedHandler } from "@workspace/api-client-react";
+
+const isPortalRoute = () => window.location.pathname.includes("/portal");
 
 // Wire the token getter once — picks the right token based on the current route:
 // portal pages use the patient session token, everything else uses the staff token.
 setAuthTokenGetter(() => {
-  if (window.location.pathname.includes("/portal")) {
+  if (isPortalRoute()) {
     return localStorage.getItem("ace_portal_token");
   }
   return localStorage.getItem("ace_access_token");
+});
+
+// On a 401 for staff routes, silently exchange the refresh token for a new
+// access token and retry the original request once. A single in-flight refresh
+// is shared across concurrent 401s.
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function refreshStaffToken(): Promise<boolean> {
+  // The patient portal has its own short-lived token with no refresh flow.
+  if (isPortalRoute()) return false;
+
+  const refreshToken = localStorage.getItem("ace_refresh_token");
+  if (!refreshToken) return false;
+
+  try {
+    const res = await fetch("/api/auth/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!res.ok) {
+      // Refresh token is invalid/expired — clear the stale session.
+      localStorage.removeItem("ace_user");
+      localStorage.removeItem("ace_access_token");
+      localStorage.removeItem("ace_refresh_token");
+      if (!window.location.pathname.endsWith("/login")) {
+        window.location.assign(`${import.meta.env.BASE_URL}login`);
+      }
+      return false;
+    }
+    const data = await res.json();
+    localStorage.setItem("ace_access_token", data.accessToken);
+    localStorage.setItem("ace_refresh_token", data.refreshToken);
+    if (data.user) localStorage.setItem("ace_user", JSON.stringify(data.user));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+setUnauthorizedHandler(() => {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshStaffToken().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
 });
 
 import Login from "@/pages/login";
