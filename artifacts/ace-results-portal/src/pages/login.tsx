@@ -8,7 +8,7 @@ import { useLogin } from "@workspace/api-client-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
-import { Shield } from "lucide-react";
+import aceLogo from "@assets/ace_logo_new_1781354030491.jpg";
 import { useToast } from "@/hooks/use-toast";
 
 const formSchema = z.object({
@@ -58,8 +58,8 @@ export default function Login() {
       <div className="flex-1 flex items-center justify-center p-8 bg-background">
         <div className="w-full max-w-sm space-y-8">
           <div className="text-center">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mb-6">
-              <Shield className="w-8 h-8 text-primary" />
+            <div className="w-20 h-20 rounded-2xl overflow-hidden mx-auto mb-6 bg-white border border-border flex items-center justify-center">
+              <img src={aceLogo} alt="ACE Medical Center" className="w-full h-full object-contain" />
             </div>
             <h1 className="text-3xl font-bold tracking-tight text-primary">ACE Staff Portal</h1>
             <p className="text-muted-foreground mt-2">Secure access for hospital personnel</p>
