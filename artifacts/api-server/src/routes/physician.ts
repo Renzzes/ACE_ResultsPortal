@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { eq, ilike } from "drizzle-orm";
-import { db, patientsTable, resultsTable } from "@workspace/db";
+import { eq, ilike, and } from "drizzle-orm";
+import { db, patientsTable, resultsTable, patientPhysiciansTable } from "@workspace/db";
 import {
   PhysicianSearchPatientQueryParams,
   ListPatientResultsPhysicianParams,
@@ -16,6 +16,7 @@ const router = Router();
 
 const physicianRoles = ["physician", "super_admin"];
 
+// Search patient — by HIS ID or last name, restricted to assigned patients for physicians
 router.get("/physician/search", requireAuth, requireRole(...physicianRoles), async (req, res): Promise<void> => {
   const params = PhysicianSearchPatientQueryParams.safeParse(req.query);
   if (!params.success) {
@@ -23,43 +24,91 @@ router.get("/physician/search", requireAuth, requireRole(...physicianRoles), asy
     return;
   }
 
-  const { patientId } = params.data;
+  const { patientId, lastName } = params.data as { patientId?: string; lastName?: string };
 
-  const [patient] = await db
-    .select()
-    .from(patientsTable)
-    .where(ilike(patientsTable.patientHisId, patientId));
-
-  if (!patient) {
-    res.status(404).json({ error: "Patient not found" });
+  if (!patientId && !lastName) {
+    res.status(400).json({ error: "Provide patientId or lastName to search" });
     return;
   }
 
-  const resultCount = await db
-    .select({ count: eq(resultsTable.patientId, patient.id) })
-    .from(resultsTable)
-    .where(eq(resultsTable.patientId, patient.id));
+  const isPhysician = req.user!.role === "physician";
+  const physicianUserId = req.user!.userId;
+
+  // Build base query conditions
+  const conditions = patientId
+    ? ilike(patientsTable.patientHisId, `%${patientId}%`)
+    : ilike(patientsTable.lastName, `%${lastName}%`);
+
+  let patients;
+
+  if (isPhysician) {
+    // Join with patient_physicians to restrict to assigned patients only
+    patients = await db
+      .select({ patient: patientsTable })
+      .from(patientsTable)
+      .innerJoin(
+        patientPhysiciansTable,
+        and(
+          eq(patientPhysiciansTable.patientId, patientsTable.id),
+          eq(patientPhysiciansTable.physicianId, physicianUserId),
+        )
+      )
+      .where(conditions)
+      .limit(20);
+    patients = patients.map((r) => r.patient);
+  } else {
+    // super_admin can search all patients
+    patients = await db
+      .select()
+      .from(patientsTable)
+      .where(conditions)
+      .limit(20);
+  }
+
+  if (patients.length === 0) {
+    res.status(404).json({ error: "No matching patient found" });
+    return;
+  }
 
   await logAudit({
     action: "view",
     req,
     userId: req.user!.userId,
     userName: req.user!.username,
-    patientHisId: patient.patientHisId,
+    patientHisId: patients[0].patientHisId,
     details: "Physician searched patient",
   });
 
-  res.json({
+  // Return array if searching by last name (multiple possible), or first match for HIS ID
+  const format = (patient: typeof patients[0]) => ({
     id: patient.id,
     patientHisId: patient.patientHisId,
     firstName: patient.firstName,
     lastName: patient.lastName,
     middleName: patient.middleName ?? null,
     dateOfBirth: patient.dateOfBirth,
-    resultCount: resultCount.length,
+    resultCount: 0, // filled below if single result
   });
+
+  if (patients.length === 1) {
+    const patient = patients[0];
+    const resultRows = await db
+      .select()
+      .from(resultsTable)
+      .where(
+        isPhysician
+          ? and(eq(resultsTable.patientId, patient.id), eq(resultsTable.status, "released"))
+          : eq(resultsTable.patientId, patient.id)
+      );
+
+    res.json({ ...format(patient), resultCount: resultRows.length });
+  } else {
+    // Multiple patients — return array
+    res.json(patients.map(format));
+  }
 });
 
+// Patient results for physician — only released results
 router.get("/physician/patients/:id/results", requireAuth, requireRole(...physicianRoles), async (req, res): Promise<void> => {
   const params = ListPatientResultsPhysicianParams.safeParse(req.params);
   if (!params.success) {
@@ -67,16 +116,40 @@ router.get("/physician/patients/:id/results", requireAuth, requireRole(...physic
     return;
   }
 
+  const isPhysician = req.user!.role === "physician";
+  const physicianUserId = req.user!.userId;
+
   const [patient] = await db.select().from(patientsTable).where(eq(patientsTable.id, params.data.id));
   if (!patient) {
     res.status(404).json({ error: "Patient not found" });
     return;
   }
 
+  // Physicians can only see their assigned patients
+  if (isPhysician) {
+    const [assignment] = await db
+      .select()
+      .from(patientPhysiciansTable)
+      .where(
+        and(
+          eq(patientPhysiciansTable.patientId, params.data.id),
+          eq(patientPhysiciansTable.physicianId, physicianUserId)
+        )
+      );
+    if (!assignment) {
+      res.status(403).json({ error: "Patient is not assigned to you" });
+      return;
+    }
+  }
+
+  const whereClause = isPhysician
+    ? and(eq(resultsTable.patientId, params.data.id), eq(resultsTable.status, "released"))
+    : eq(resultsTable.patientId, params.data.id);
+
   const results = await db
     .select()
     .from(resultsTable)
-    .where(eq(resultsTable.patientId, params.data.id))
+    .where(whereClause)
     .orderBy(resultsTable.uploadedAt);
 
   await logAudit({
@@ -125,6 +198,27 @@ router.get("/physician/results/:id/download", requireAuth, requireRole(...physic
     return;
   }
 
+  // Physicians can only download released results from assigned patients
+  if (req.user!.role === "physician") {
+    if (result.status !== "released") {
+      res.status(403).json({ error: "Result is not released" });
+      return;
+    }
+    const [assignment] = await db
+      .select()
+      .from(patientPhysiciansTable)
+      .where(
+        and(
+          eq(patientPhysiciansTable.patientId, result.patientId),
+          eq(patientPhysiciansTable.physicianId, req.user!.userId)
+        )
+      );
+    if (!assignment) {
+      res.status(403).json({ error: "Patient is not assigned to you" });
+      return;
+    }
+  }
+
   const token = signDownloadToken(result.id, "physician");
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
@@ -145,6 +239,7 @@ router.get("/physician/results/:id/download", requireAuth, requireRole(...physic
 
 router.get("/physician/file/:token", async (req, res): Promise<void> => {
   const { token } = req.params as { token: string };
+  const { inline } = req.query as { inline?: string };
   const payload = verifyToken(token);
 
   if (!payload || payload["type"] !== "download") {
@@ -169,13 +264,16 @@ router.get("/physician/file/:token", async (req, res): Promise<void> => {
   const mimeMap: Record<string, string> = {
     pdf: "application/pdf",
     jpeg: "image/jpeg",
+    jpg: "image/jpeg",
     png: "image/png",
   };
+
+  const disposition = inline === "1" ? "inline" : "attachment";
 
   res.setHeader("Content-Type", mimeMap[result.fileType] ?? "application/octet-stream");
   res.setHeader(
     "Content-Disposition",
-    `attachment; filename="${encodeURIComponent(result.originalFileName)}"`,
+    `${disposition}; filename="${encodeURIComponent(result.originalFileName)}"`,
   );
 
   const stream = fs.createReadStream(filePath);

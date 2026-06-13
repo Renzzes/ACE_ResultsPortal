@@ -2306,7 +2306,7 @@ export const usePatientPortalLogout = <TError = ErrorType<unknown>,
       return useMutation(getPatientPortalLogoutMutationOptions(options));
     }
 
-export const getPhysicianSearchPatientUrl = (params: PhysicianSearchPatientParams,) => {
+export const getPhysicianSearchPatientUrl = (params?: PhysicianSearchPatientParams,) => {
   const normalizedParams = new URLSearchParams();
 
   Object.entries(params || {}).forEach(([key, value]) => {
@@ -2322,9 +2322,9 @@ export const getPhysicianSearchPatientUrl = (params: PhysicianSearchPatientParam
 }
 
 /**
- * @summary Physician searches for a patient by ID
+ * @summary Physician searches for a patient by HIS ID or last name
  */
-export const physicianSearchPatient = async (params: PhysicianSearchPatientParams, options?: RequestInit): Promise<PhysicianPatientView> => {
+export const physicianSearchPatient = async (params?: PhysicianSearchPatientParams, options?: RequestInit): Promise<PhysicianPatientView> => {
 
   return customFetch<PhysicianPatientView>(getPhysicianSearchPatientUrl(params),
   {
@@ -2346,7 +2346,7 @@ export const getPhysicianSearchPatientQueryKey = (params?: PhysicianSearchPatien
     }
 
 
-export const getPhysicianSearchPatientQueryOptions = <TData = Awaited<ReturnType<typeof physicianSearchPatient>>, TError = ErrorType<void>>(params: PhysicianSearchPatientParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof physicianSearchPatient>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getPhysicianSearchPatientQueryOptions = <TData = Awaited<ReturnType<typeof physicianSearchPatient>>, TError = ErrorType<void>>(params?: PhysicianSearchPatientParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof physicianSearchPatient>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
@@ -2369,11 +2369,11 @@ export type PhysicianSearchPatientQueryError = ErrorType<void>
 
 
 /**
- * @summary Physician searches for a patient by ID
+ * @summary Physician searches for a patient by HIS ID or last name
  */
 
 export function usePhysicianSearchPatient<TData = Awaited<ReturnType<typeof physicianSearchPatient>>, TError = ErrorType<void>>(
- params: PhysicianSearchPatientParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof physicianSearchPatient>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: PhysicianSearchPatientParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof physicianSearchPatient>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 

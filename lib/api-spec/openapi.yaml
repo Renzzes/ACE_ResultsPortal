@@ -739,11 +739,16 @@ paths:
     get:
       operationId: physicianSearchPatient
       tags: [physician-portal]
-      summary: Physician searches for a patient by ID
+      summary: Physician searches for a patient by HIS ID or last name
       parameters:
         - name: patientId
           in: query
-          required: true
+          required: false
+          schema:
+            type: string
+        - name: lastName
+          in: query
+          required: false
           schema:
             type: string
       responses:
