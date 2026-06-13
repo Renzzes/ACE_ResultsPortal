@@ -1,41 +1,28 @@
 import { useLocation } from "wouter";
-import { UserRound, Shield } from "lucide-react";
+import { UserRound } from "lucide-react";
 import aceLogo from "@assets/ace_logo_new_1781354030491.jpg";
 
 export default function HomePage() {
   const [, setLocation] = useLocation();
 
   return (
-    <div className="min-h-screen flex">
-      {/* Left panel — branding */}
-      <div className="hidden lg:flex lg:w-1/2 bg-[#0a1f5c] flex-col items-center justify-center p-12">
-        <div className="text-center text-white space-y-4 max-w-sm">
-          <div className="w-24 h-24 rounded-2xl overflow-hidden mx-auto mb-6 bg-white flex items-center justify-center">
-            <img src={aceLogo} alt="ACE Medical Center" className="w-full h-full object-contain" />
-          </div>
-          <h1 className="text-3xl font-bold tracking-tight">ACE Medical Center</h1>
-          <p className="text-blue-200 text-lg">Cebu</p>
-          <div className="border-t border-white/20 pt-6 mt-6">
-            <p className="text-blue-100 text-sm leading-relaxed">
-              Secure diagnostic results management for patients, physicians, and hospital personnel.
-            </p>
-          </div>
+    <div className="min-h-screen flex flex-col bg-gray-50">
+      {/* Blue header — branding */}
+      <div className="bg-[#0a1f5c] flex flex-col items-center justify-center py-10 px-8 text-center text-white">
+        <div className="w-24 h-24 rounded-2xl overflow-hidden bg-white flex items-center justify-center mb-5 shadow-lg">
+          <img src={aceLogo} alt="ACE Medical Center" className="w-full h-full object-contain" />
         </div>
+        <h1 className="text-2xl font-bold tracking-tight">ACE Medical Center</h1>
+        <p className="text-blue-200 mt-1">Cebu</p>
+        <p className="text-blue-100/80 text-sm mt-3 max-w-xs leading-relaxed">
+          Secure diagnostic results management for patients, physicians, and hospital personnel.
+        </p>
       </div>
 
-      {/* Right panel — portal selection */}
-      <div className="flex-1 flex flex-col items-center justify-center bg-gray-50 p-8">
-        <div className="w-full max-w-sm space-y-8">
-          {/* Mobile logo */}
-          <div className="lg:hidden text-center space-y-2">
-            <div className="w-16 h-16 rounded-2xl overflow-hidden mx-auto bg-white border border-border flex items-center justify-center">
-              <img src={aceLogo} alt="ACE Medical Center" className="w-full h-full object-contain" />
-            </div>
-            <h1 className="text-2xl font-bold text-[#0a1f5c]">ACE Medical Center</h1>
-            <p className="text-muted-foreground text-sm">Cebu</p>
-          </div>
-
-          <div className="space-y-2">
+      {/* Welcome section — portal selection */}
+      <div className="flex-1 flex flex-col items-center justify-center p-8">
+        <div className="w-full max-w-sm space-y-6">
+          <div className="space-y-1">
             <h2 className="text-2xl font-bold text-gray-900">Welcome</h2>
             <p className="text-muted-foreground text-sm">Choose how you would like to access the system.</p>
           </div>
