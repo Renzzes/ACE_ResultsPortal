@@ -437,7 +437,7 @@ router.get("/patients/:id/results", requireAuth, async (req, res): Promise<void>
 // ─── Physician assignment endpoints ───────────────────────────────────────
 
 router.get("/patients/:id/physicians", requireAuth, async (req, res): Promise<void> => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (!id) { res.status(400).json({ error: "Invalid patient ID" }); return; }
 
   const rows = await db
@@ -461,7 +461,7 @@ router.get("/patients/:id/physicians", requireAuth, async (req, res): Promise<vo
 });
 
 router.post("/patients/:id/physicians", requireAuth, async (req, res): Promise<void> => {
-  const patientId = parseInt(req.params.id, 10);
+  const patientId = parseInt(String(req.params.id), 10);
   const physicianId = parseInt(String(req.body.physicianId), 10);
 
   if (!patientId || !physicianId) {
@@ -511,8 +511,8 @@ router.post("/patients/:id/physicians", requireAuth, async (req, res): Promise<v
 });
 
 router.delete("/patients/:id/physicians/:physicianId", requireAuth, async (req, res): Promise<void> => {
-  const patientId = parseInt(req.params.id, 10);
-  const physicianId = parseInt(req.params.physicianId, 10);
+  const patientId = parseInt(String(req.params.id), 10);
+  const physicianId = parseInt(String(req.params.physicianId), 10);
 
   if (!patientId || !physicianId) {
     res.status(400).json({ error: "Invalid IDs" });
