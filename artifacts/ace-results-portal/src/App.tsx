@@ -63,6 +63,7 @@ setUnauthorizedHandler(() => {
   return refreshInFlight;
 });
 
+import HomePage from "@/pages/home";
 import Login from "@/pages/login";
 import Dashboard from "@/pages/dashboard";
 import PatientsPage from "@/pages/patients/index";
@@ -98,7 +99,7 @@ function ProtectedRoute({ component: Component }: { component: React.ComponentTy
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={() => <Redirect to="/login" />} />
+      <Route path="/" component={HomePage} />
 
       {/* Auth */}
       <Route path="/login" component={Login} />
