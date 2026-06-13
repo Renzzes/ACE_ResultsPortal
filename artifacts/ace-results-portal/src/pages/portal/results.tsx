@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocation, Redirect } from "wouter";
 import {
   useGetPortalResults,
@@ -50,18 +50,22 @@ function ResultCard({ result, onView }: { result: any; onView: (r: any) => void 
     { query: { enabled: viewEnabled, queryKey: [...getGetPortalResultDownloadUrlQueryKey(result.id), "view"] } }
   );
 
-  if (downloadData?.url && downloadEnabled) {
-    const link = document.createElement("a");
-    link.href = downloadData.url;
-    link.download = result.originalFileName;
-    link.click();
-    setDownloadEnabled(false);
-  }
+  useEffect(() => {
+    if (downloadData?.url && downloadEnabled) {
+      const link = document.createElement("a");
+      link.href = downloadData.url;
+      link.download = result.originalFileName;
+      link.click();
+      setDownloadEnabled(false);
+    }
+  }, [downloadData?.url, downloadEnabled]);
 
-  if (viewData?.url && viewEnabled) {
-    onView({ url: viewData.url, fileType: result.fileType, fileName: result.originalFileName });
-    setViewEnabled(false);
-  }
+  useEffect(() => {
+    if (viewData?.url && viewEnabled) {
+      onView({ url: viewData.url, fileType: result.fileType, fileName: result.originalFileName });
+      setViewEnabled(false);
+    }
+  }, [viewData?.url, viewEnabled]);
 
   return (
     <div className="bg-card border border-border rounded-xl p-5 shadow-sm">

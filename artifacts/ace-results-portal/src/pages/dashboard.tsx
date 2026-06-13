@@ -16,7 +16,11 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line,
 } from "recharts";
-import { Users, FileText, Clock, Download, Upload, Activity } from "lucide-react";
+import {
+  Users, FileText, Clock, Download, Upload, Activity,
+  UserPlus, Search, ArrowRight,
+} from "lucide-react";
+import { Link } from "wouter";
 
 const CATEGORY_LABELS: Record<string, string> = {
   laboratory: "Lab", radiology: "Radiology", ultrasound: "Ultrasound",
@@ -41,6 +45,10 @@ const ROLE_LABELS: Record<string, string> = {
   laboratory: "Laboratory Staff", radiology: "Radiology Staff", physician: "Physician",
 };
 
+function Skeleton({ className }: { className?: string }) {
+  return <div className={`animate-pulse bg-muted rounded-lg ${className ?? ""}`} />;
+}
+
 function StatCard({ icon: Icon, label, value, colorClass }: { icon: any; label: string; value: number | string; colorClass?: string }) {
   return (
     <div className="bg-card rounded-xl border border-border p-6 shadow-sm space-y-3">
@@ -55,11 +63,122 @@ function StatCard({ icon: Icon, label, value, colorClass }: { icon: any; label: 
   );
 }
 
-function Skeleton({ className }: { className?: string }) {
-  return <div className={`animate-pulse bg-muted rounded-lg ${className ?? ""}`} />;
+// ─── Staff Quick-Action Card ───────────────────────────────────────────────
+function ActionCard({
+  icon: Icon, title, description, href, colorClass,
+}: {
+  icon: any; title: string; description: string; href: string; colorClass: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="group flex items-center gap-4 bg-card border border-border rounded-xl p-5 shadow-sm hover:shadow-md hover:border-primary/30 transition-all cursor-pointer no-underline"
+    >
+      <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${colorClass}`}>
+        <Icon className="w-6 h-6 text-white" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="font-semibold text-base text-foreground">{title}</p>
+        <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
+      </div>
+      <ArrowRight className="w-5 h-5 text-muted-foreground group-hover:text-primary transition-colors flex-shrink-0" />
+    </Link>
+  );
 }
 
-export default function Dashboard() {
+// ─── Simplified Staff Dashboard ────────────────────────────────────────────
+function StaffDashboard() {
+  const { auth } = useAuth();
+  const role = auth.user?.role ?? "";
+  const isPhysician = role === "physician";
+
+  const { data: stats, isLoading: loadingStats } = useGetDashboardStats({
+    query: { queryKey: getGetDashboardStatsQueryKey() }
+  });
+
+  const actions = isPhysician
+    ? [
+        {
+          icon: Search, title: "Search Patients", href: "/physician/search",
+          description: "Find a patient and view their released results",
+          colorClass: "bg-primary",
+        },
+        {
+          icon: FileText, title: "All Results", href: "/results",
+          description: "Browse all released diagnostic results",
+          colorClass: "bg-teal-600",
+        },
+      ]
+    : [
+        {
+          icon: UserPlus, title: "Add New Patient", href: "/patients/new",
+          description: "Register a new patient and generate an access code",
+          colorClass: "bg-primary",
+        },
+        {
+          icon: Upload, title: "Upload Result", href: "/results/upload",
+          description: "Upload a diagnostic result file for a patient",
+          colorClass: "bg-teal-600",
+        },
+        {
+          icon: Users, title: "All Patients", href: "/patients",
+          description: "Search and manage existing patient records",
+          colorClass: "bg-slate-600",
+        },
+        {
+          icon: FileText, title: "All Results", href: "/results",
+          description: "Browse and manage uploaded diagnostic results",
+          colorClass: "bg-indigo-600",
+        },
+      ];
+
+  return (
+    <StaffLayout>
+      <div className="space-y-8 max-w-3xl">
+        {/* Header */}
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight text-primary">
+            Good day, {auth.user?.firstName}!
+          </h2>
+          <p className="text-muted-foreground mt-1">
+            {ROLE_LABELS[role] ?? role} · ACE Medical Center Cebu
+          </p>
+        </div>
+
+        {/* Stats */}
+        {loadingStats ? (
+          <div className="grid gap-4 grid-cols-2 sm:grid-cols-3">
+            {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-28" />)}
+          </div>
+        ) : (
+          <div className="grid gap-4 grid-cols-2 sm:grid-cols-3">
+            <StatCard icon={Users} label="Total Patients" value={stats?.totalPatients ?? 0} />
+            <StatCard icon={FileText} label="Total Results" value={stats?.totalResults ?? 0} />
+            <StatCard
+              icon={Clock} label="Pending Release" value={stats?.totalPending ?? 0}
+              colorClass={stats?.totalPending ? "bg-amber-500" : undefined}
+            />
+          </div>
+        )}
+
+        {/* Quick Actions */}
+        <div>
+          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+            Quick Actions
+          </h3>
+          <div className="flex flex-col gap-3">
+            {actions.map((a) => (
+              <ActionCard key={a.href} {...a} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </StaffLayout>
+  );
+}
+
+// ─── Full Admin Dashboard ──────────────────────────────────────────────────
+function AdminDashboard() {
   const { auth } = useAuth();
 
   const { data: stats, isLoading: loadingStats } = useGetDashboardStats({
@@ -82,11 +201,9 @@ export default function Dashboard() {
   const deptData = Array.isArray(byDept)
     ? byDept.map(d => ({ name: CATEGORY_LABELS[d.category] ?? d.category, count: d.count }))
     : [];
-
   const dailyData = Array.isArray(daily)
     ? daily.map(d => ({ date: d.date.slice(5), count: d.count }))
     : [];
-
   const activity = Array.isArray(recentActivity) ? recentActivity : [];
   const users = Array.isArray(topUsers) ? topUsers : [];
 
@@ -98,7 +215,6 @@ export default function Dashboard() {
           <p className="text-muted-foreground">Welcome back, {auth.user?.firstName}. Here is an overview of ACE Medical Portal.</p>
         </div>
 
-        {/* Stat Cards */}
         {loadingStats ? (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-32" />)}
@@ -107,7 +223,7 @@ export default function Dashboard() {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <StatCard icon={Users} label="Total Patients" value={stats?.totalPatients ?? 0} />
             <StatCard icon={FileText} label="Total Results" value={stats?.totalResults ?? 0} />
-            <StatCard icon={Clock} label="Pending Release" value={stats?.totalPending ?? 0} colorClass={stats?.totalPending ? "bg-amber-500" : "bg-primary/10"} />
+            <StatCard icon={Clock} label="Pending Release" value={stats?.totalPending ?? 0} colorClass={stats?.totalPending ? "bg-amber-500" : undefined} />
             <StatCard icon={Download} label="Total Downloads" value={stats?.totalDownloads ?? 0} />
             <StatCard icon={Upload} label="Uploads Today" value={stats?.uploadsToday ?? 0} />
             <StatCard icon={Activity} label="This Month" value={stats?.uploadsThisMonth ?? 0} />
@@ -116,9 +232,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Charts */}
         <div className="grid gap-6 lg:grid-cols-2">
-          {/* By Department Bar Chart */}
           <div className="bg-card border border-border rounded-xl p-5 shadow-sm">
             <h3 className="font-semibold mb-4">Uploads by Department</h3>
             {loadingDept ? (
@@ -138,7 +252,6 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* Daily Uploads Line Chart */}
           <div className="bg-card border border-border rounded-xl p-5 shadow-sm">
             <h3 className="font-semibold mb-4">Daily Uploads (Last 30 Days)</h3>
             {loadingDaily ? (
@@ -159,9 +272,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Bottom Row */}
         <div className="grid gap-6 lg:grid-cols-2">
-          {/* Recent Activity */}
           <div className="bg-card border border-border rounded-xl p-5 shadow-sm">
             <h3 className="font-semibold mb-4">Recent Activity</h3>
             {activity.length === 0 ? (
@@ -185,7 +296,6 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* Top Uploaders */}
           <div className="bg-card border border-border rounded-xl p-5 shadow-sm">
             <h3 className="font-semibold mb-4">Top Uploaders</h3>
             {users.length === 0 ? (
@@ -214,4 +324,11 @@ export default function Dashboard() {
       </div>
     </StaffLayout>
   );
+}
+
+// ─── Route to correct dashboard by role ───────────────────────────────────
+export default function Dashboard() {
+  const { auth } = useAuth();
+  if (auth.user?.role === "super_admin") return <AdminDashboard />;
+  return <StaffDashboard />;
 }
