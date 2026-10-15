@@ -7,6 +7,15 @@ import {
 } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
 import { Plus, ShieldOff } from "lucide-react";
@@ -27,11 +36,14 @@ const ROLE_COLORS: Record<string, string> = {
   physician: "bg-green-100 text-green-800",
 };
 
+type DeactivateTarget = { id: number; username: string };
+
 export default function UsersPage() {
   const [, setLocation] = useLocation();
   const { auth } = useAuth();
   const { toast } = useToast();
   const [page, setPage] = useState(1);
+  const [deactivateTarget, setDeactivateTarget] = useState<DeactivateTarget | null>(null);
 
   const { data, isLoading, refetch } = useListUsers(
     { page, limit: 20 },
@@ -42,7 +54,7 @@ export default function UsersPage() {
 
   if (auth.user?.role !== "super_admin") {
     return (
-      <StaffLayout>
+      <StaffLayout title="Staff Users">
         <div className="text-center py-16">
           <p className="text-xl font-semibold text-destructive">Access Denied</p>
           <p className="text-muted-foreground mt-2">Only Super Admins can manage staff users.</p>
@@ -51,32 +63,38 @@ export default function UsersPage() {
     );
   }
 
-  const users = data?.data ?? [];
+  // Defense in depth: API already omits patient roles; keep UI filter for any stale clients.
+  const users = (data?.data ?? []).filter((u) => (u.role as string) !== "patient");
   const total = data?.total ?? 0;
   const totalPages = Math.ceil(total / 20);
 
-  const handleDeactivate = (id: number, username: string) => {
-    if (!confirm(`Deactivate user "${username}"?`)) return;
-    deactivate.mutate({ id }, {
-      onSuccess: () => { toast({ title: `User ${username} deactivated` }); refetch(); },
-      onError: () => toast({ title: "Failed to deactivate user", variant: "destructive" }),
-    });
+  const confirmDeactivate = () => {
+    if (!deactivateTarget) return;
+    const { id, username } = deactivateTarget;
+    deactivate.mutate(
+      { id },
+      {
+        onSuccess: () => {
+          toast({ title: `User ${username} deactivated` });
+          setDeactivateTarget(null);
+          void refetch();
+        },
+        onError: () => toast({ title: "Failed to deactivate user", variant: "destructive" }),
+      },
+    );
   };
 
   return (
-    <StaffLayout>
-      <div className="space-y-6">
+    <StaffLayout title="Staff Users" fill>
+      <div className="flex h-full min-h-0 flex-col gap-4">
         <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-3xl font-bold tracking-tight text-primary">Staff Users</h2>
-            <p className="text-muted-foreground">Manage hospital staff accounts and permissions</p>
-          </div>
+          <p className="st-muted text-sm">Manage hospital staff accounts and permissions</p>
           <Button onClick={() => setLocation("/users/new")}>
             <Plus className="w-4 h-4 mr-2" />Add User
           </Button>
         </div>
 
-        <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
+        <div className="st-card flex-1 min-h-0 overflow-auto rounded-2xl">
           {isLoading ? (
             <div className="p-8 text-center text-muted-foreground">Loading users...</div>
           ) : users.length === 0 ? (
@@ -88,7 +106,7 @@ export default function UsersPage() {
             </div>
           ) : (
             <table className="w-full text-sm">
-              <thead className="bg-muted/50 border-b border-border">
+              <thead className="sticky top-0 bg-[hsl(var(--st-cream))] border-b border-[hsl(var(--st-border))]">
                 <tr>
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">Username</th>
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">Full Name</th>
@@ -125,7 +143,7 @@ export default function UsersPage() {
                             size="sm"
                             variant="ghost"
                             className="text-destructive"
-                            onClick={() => handleDeactivate(u.id, u.username)}
+                            onClick={() => setDeactivateTarget({ id: u.id, username: u.username })}
                             disabled={deactivate.isPending}
                           >
                             <ShieldOff className="w-4 h-4 mr-1" />Deactivate
@@ -151,6 +169,37 @@ export default function UsersPage() {
           </div>
         )}
       </div>
+
+      <AlertDialog
+        open={Boolean(deactivateTarget)}
+        onOpenChange={(open) => {
+          if (!open && !deactivate.isPending) setDeactivateTarget(null);
+        }}
+      >
+        <AlertDialogContent className="border-[hsl(var(--st-border))] sm:rounded-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Deactivate user?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Deactivate{" "}
+              <span className="font-semibold text-foreground">
+                “{deactivateTarget?.username ?? "this user"}”
+              </span>
+              ? They will no longer be able to sign in until reactivated.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deactivate.isPending}>Cancel</AlertDialogCancel>
+            <button
+              type="button"
+              className="inline-flex h-10 items-center justify-center rounded-md bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+              disabled={deactivate.isPending}
+              onClick={confirmDeactivate}
+            >
+              {deactivate.isPending ? "Deactivating…" : "Deactivate"}
+            </button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </StaffLayout>
   );
 }

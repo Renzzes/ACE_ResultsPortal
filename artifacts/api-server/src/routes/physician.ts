@@ -1,6 +1,14 @@
 import { Router } from "express";
-import { eq, ilike, and, or } from "drizzle-orm";
-import { db, patientsTable, resultsTable, patientPhysiciansTable } from "@workspace/db";
+import fs from "fs";
+import {
+  patientsRepo,
+  patientPhysiciansRepo,
+  prescriptionsRepo,
+  resultPhysiciansRepo,
+  resultsRepo,
+  usersRepo,
+  withTransaction,
+} from "@workspace/db";
 import {
   PhysicianSearchPatientQueryParams,
   ListPatientResultsPhysicianParams,
@@ -9,74 +17,49 @@ import {
 import { requireAuth, requireRole } from "../middlewares/auth";
 import { signDownloadToken, verifyToken } from "../lib/auth";
 import { getFilePath } from "../lib/storage";
-import { logAudit } from "../lib/audit";
-import fs from "fs";
+import { denyAccess, logAudit } from "../lib/audit";
+import { formatResult } from "../lib/formatters";
+import { canAccessResult } from "../lib/result-access";
+import { loadReviewExtras } from "../lib/result-review";
+import {
+  assertPhysicianMayAccessPatient,
+  parsePrescriptionCreateItems,
+  trimNullable,
+} from "../lib/prescription-access";
+import { formatPrescription } from "../lib/format-prescription";
+import { notifyPatientPrescriptionCreated } from "../lib/notify-prescription-created";
 
 const router = Router();
 
-const physicianRoles = ["physician", "super_admin"];
+const physicianRoles = ["physician", "super_admin"] as const;
+const PRESCRIPTION_SCHEMA_MSG =
+  "Prescriptions schema is not installed. Run docs/migration/sql/011_create_prescriptions.sql against ACE_ResultsPortal.";
 
-// Search patient — by HIS ID or last name, restricted to assigned patients for physicians
 router.get("/physician/search", requireAuth, requireRole(...physicianRoles), async (req, res): Promise<void> => {
   const params = PhysicianSearchPatientQueryParams.safeParse(req.query);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
-
-  const { q } = params.data as { q?: string };
-  const term = q?.trim();
-
+  const term = (params.data as { q?: string }).q?.trim();
   if (!term) {
     res.status(400).json({ error: "Provide a search term" });
     return;
   }
 
   const isPhysician = req.user!.role === "physician";
-  const physicianUserId = req.user!.userId;
-
-  // Match either HIS ID or last name with a single search term
-  const conditions = or(
-    ilike(patientsTable.patientHisId, `%${term}%`),
-    ilike(patientsTable.lastName, `%${term}%`),
+  let patients = await patientsRepo.searchPatientsByTerm(
+    term,
+    isPhysician ? req.user!.userId : undefined,
   );
-
-  let patients;
-
-  if (isPhysician) {
-    // Join with patient_physicians to restrict to assigned patients only
-    patients = await db
-      .select({ patient: patientsTable })
-      .from(patientsTable)
-      .innerJoin(
-        patientPhysiciansTable,
-        and(
-          eq(patientPhysiciansTable.patientId, patientsTable.id),
-          eq(patientPhysiciansTable.physicianId, physicianUserId),
-        )
-      )
-      .where(conditions)
-      .limit(20);
-    patients = patients.map((r) => r.patient);
-  } else {
-    // super_admin can search all patients
-    patients = await db
-      .select()
-      .from(patientsTable)
-      .where(conditions)
-      .limit(20);
-  }
 
   if (patients.length === 0) {
     res.status(404).json({ error: "No matching patient found" });
     return;
   }
 
-  // Exact HIS ID match takes precedence — collapse to single result
   const exact = patients.find((p) => p.patientHisId.toLowerCase() === term.toLowerCase());
-  if (exact) {
-    patients = [exact];
-  }
+  if (exact) patients = [exact];
 
   await logAudit({
     action: "view",
@@ -87,170 +70,149 @@ router.get("/physician/search", requireAuth, requireRole(...physicianRoles), asy
     details: "Physician searched patient",
   });
 
-  // Return array if searching by last name (multiple possible), or first match for HIS ID
-  const format = (patient: typeof patients[0]) => ({
+  const format = (patient: (typeof patients)[0], resultCount = 0) => ({
     id: patient.id,
     patientHisId: patient.patientHisId,
     firstName: patient.firstName,
     lastName: patient.lastName,
     middleName: patient.middleName ?? null,
     dateOfBirth: patient.dateOfBirth,
-    resultCount: 0, // filled below if single result
+    resultCount,
   });
 
   if (patients.length === 1) {
     const patient = patients[0];
-    const resultRows = await db
-      .select()
-      .from(resultsTable)
-      .where(
-        isPhysician
-          ? and(eq(resultsTable.patientId, patient.id), eq(resultsTable.status, "released"))
-          : eq(resultsTable.patientId, patient.id)
-      );
-
-    res.json({ ...format(patient), resultCount: resultRows.length });
-  } else {
-    // Multiple patients — return array
-    res.json(patients.map(format));
+    const resultRows = await resultsRepo.listResultsForPatient(patient.id);
+    const visible = [];
+    for (const row of resultRows) {
+      if (await canAccessResult(req.user!, row)) visible.push(row);
+    }
+    res.json(format(patient, visible.length));
+    return;
   }
+
+  res.json(patients.map((p) => format(p)));
 });
 
-// Patient results for physician — only released results
-router.get("/physician/patients/:id/results", requireAuth, requireRole(...physicianRoles), async (req, res): Promise<void> => {
-  const params = ListPatientResultsPhysicianParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-
-  const isPhysician = req.user!.role === "physician";
-  const physicianUserId = req.user!.userId;
-
-  const [patient] = await db.select().from(patientsTable).where(eq(patientsTable.id, params.data.id));
-  if (!patient) {
-    res.status(404).json({ error: "Patient not found" });
-    return;
-  }
-
-  // Physicians can only see their assigned patients
-  if (isPhysician) {
-    const [assignment] = await db
-      .select()
-      .from(patientPhysiciansTable)
-      .where(
-        and(
-          eq(patientPhysiciansTable.patientId, params.data.id),
-          eq(patientPhysiciansTable.physicianId, physicianUserId)
-        )
-      );
-    if (!assignment) {
-      res.status(403).json({ error: "Patient is not assigned to you" });
+router.get(
+  "/physician/patients/:id/results",
+  requireAuth,
+  requireRole(...physicianRoles),
+  async (req, res): Promise<void> => {
+    const params = ListPatientResultsPhysicianParams.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
       return;
     }
-  }
 
-  const whereClause = isPhysician
-    ? and(eq(resultsTable.patientId, params.data.id), eq(resultsTable.status, "released"))
-    : eq(resultsTable.patientId, params.data.id);
-
-  const results = await db
-    .select()
-    .from(resultsTable)
-    .where(whereClause)
-    .orderBy(resultsTable.uploadedAt);
-
-  await logAudit({
-    action: "view",
-    req,
-    userId: req.user!.userId,
-    userName: req.user!.username,
-    patientHisId: patient.patientHisId,
-    details: "Physician viewed patient results",
-  });
-
-  const formatted = results.map((r) => ({
-    id: r.id,
-    patientId: r.patientId,
-    patientHisId: patient.patientHisId,
-    patientName: `${patient.lastName}, ${patient.firstName}`,
-    category: r.category,
-    fileName: r.fileName,
-    originalFileName: r.originalFileName,
-    fileType: r.fileType,
-    fileSizeBytes: r.fileSizeBytes ?? 0,
-    releaseOption: r.releaseOption,
-    scheduledReleaseDate: r.scheduledReleaseDate ?? null,
-    dateReleased: r.dateReleased ? r.dateReleased.toISOString() : null,
-    status: r.status,
-    remarks: r.remarks ?? null,
-    uploadedById: r.uploadedById,
-    uploadedByName: `Staff #${r.uploadedById}`,
-    uploadedAt: r.uploadedAt.toISOString(),
-    createdAt: r.createdAt.toISOString(),
-  }));
-
-  res.json(formatted);
-});
-
-router.get("/physician/results/:id/download", requireAuth, requireRole(...physicianRoles), async (req, res): Promise<void> => {
-  const params = PhysicianGetResultDownloadUrlParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-
-  const [result] = await db.select().from(resultsTable).where(eq(resultsTable.id, params.data.id));
-  if (!result) {
-    res.status(404).json({ error: "Result not found" });
-    return;
-  }
-
-  // Physicians can only download released results from assigned patients
-  if (req.user!.role === "physician") {
-    if (result.status !== "released") {
-      res.status(403).json({ error: "Result is not released" });
+    const patient = await patientsRepo.findPatientById(params.data.id);
+    if (!patient) {
+      res.status(404).json({ error: "Patient not found" });
       return;
     }
-    const [assignment] = await db
-      .select()
-      .from(patientPhysiciansTable)
-      .where(
-        and(
-          eq(patientPhysiciansTable.patientId, result.patientId),
-          eq(patientPhysiciansTable.physicianId, req.user!.userId)
-        )
-      );
-    if (!assignment) {
-      res.status(403).json({ error: "Patient is not assigned to you" });
+
+    const isPhysician = req.user!.role === "physician";
+    if (isPhysician) {
+      const assignment = await patientPhysiciansRepo.findAssignment(params.data.id, req.user!.userId);
+      if (!assignment) {
+        const candidateResults = await resultsRepo.listResultsForPatient(params.data.id);
+        let hasPrivateReview = false;
+        for (const row of candidateResults) {
+          if (await resultPhysiciansRepo.findAssignment(row.id, req.user!.userId)) {
+            hasPrivateReview = true;
+            break;
+          }
+        }
+        if (!hasPrivateReview) {
+          await denyAccess(req, res, {
+            error: "Patient is not assigned to you",
+            details: "Unauthorized attempt to access unassigned patient results",
+            patientHisId: patient.patientHisId,
+          });
+          return;
+        }
+      }
+    }
+
+    const results = await resultsRepo.listResultsForPatient(params.data.id);
+    const visible = [];
+    for (const row of results) {
+      if (await canAccessResult(req.user!, row)) visible.push(row);
+    }
+
+    await logAudit({
+      action: "view",
+      req,
+      userId: req.user!.userId,
+      userName: req.user!.username,
+      patientHisId: patient.patientHisId,
+      details: "Physician viewed patient results",
+    });
+
+    res.json(
+      await Promise.all(visible.map(async (r) =>
+        formatResult(r, {
+          patientHisId: patient.patientHisId,
+          patientName: `${patient.lastName}, ${patient.firstName}`,
+          ...(req.user!.role === "physician"
+            ? await loadReviewExtras(r.id, req.user!)
+            : {}),
+        }),
+      )),
+    );
+  },
+);
+
+router.get(
+  "/physician/results/:id/download",
+  requireAuth,
+  requireRole(...physicianRoles),
+  async (req, res): Promise<void> => {
+    const params = PhysicianGetResultDownloadUrlParams.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
       return;
     }
-  }
 
-  const token = signDownloadToken(result.id, "physician", req.user!.userId);
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const result = await resultsRepo.findResultById(params.data.id);
+    if (!result) {
+      res.status(404).json({ error: "Result not found" });
+      return;
+    }
 
-  await logAudit({
-    action: "download",
-    req,
-    userId: req.user!.userId,
-    userName: req.user!.username,
-    resultId: result.id,
-    details: "Physician downloaded result",
-  });
+    if (!(await canAccessResult(req.user!, result))) {
+      await denyAccess(req, res, {
+        error: "Not authorized to download this result",
+        details: "Unauthorized attempt to download result",
+        resultId: result.id,
+      });
+      return;
+    }
 
-  res.json({
-    url: `/api/physician/file/${token}`,
-    expiresAt,
-  });
-});
+    const token = signDownloadToken({
+      resultId: result.id,
+      forType: "physician",
+      subjectId: req.user!.userId,
+    });
+    await logAudit({
+      action: "download",
+      req,
+      userId: req.user!.userId,
+      userName: req.user!.username,
+      resultId: result.id,
+      details: "Physician downloaded result",
+    });
+    res.json({
+      url: `/api/physician/file/${token}`,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    });
+  },
+);
 
 router.get("/physician/file/:token", async (req, res): Promise<void> => {
   const { token } = req.params as { token: string };
   const { inline } = req.query as { inline?: string };
   const payload = verifyToken(token);
-
-  // Enforce token type AND audience — a physician file link must be a physician-scoped download token
   if (!payload || payload["type"] !== "download" || payload["forType"] !== "physician") {
     res.status(401).json({ error: "Invalid or expired download link" });
     return;
@@ -258,35 +220,44 @@ router.get("/physician/file/:token", async (req, res): Promise<void> => {
 
   const resultId = payload["resultId"] as number;
   const subjectId = payload["subjectId"] as number | undefined;
-  const [result] = await db.select().from(resultsTable).where(eq(resultsTable.id, resultId));
-
+  const result = await resultsRepo.findResultById(resultId);
   if (!result) {
     res.status(404).json({ error: "Result not found" });
     return;
   }
-
-  // Re-validate at serve time: result must still be released and still assigned to the token's physician
-  if (result.status !== "released") {
-    res.status(403).json({ error: "Result is not released" });
+  if (subjectId === undefined) {
+    res.status(401).json({ error: "Invalid download token" });
     return;
   }
-  if (subjectId !== undefined) {
-    const [assignment] = await db
-      .select()
-      .from(patientPhysiciansTable)
-      .where(
-        and(
-          eq(patientPhysiciansTable.patientId, result.patientId),
-          eq(patientPhysiciansTable.physicianId, subjectId)
-        )
-      );
-    if (!assignment) {
-      res.status(403).json({ error: "Patient is not assigned to you" });
-      return;
-    }
+
+  const user = await usersRepo.findUserById(subjectId);
+  if (!user || !user.isActive) {
+    await denyAccess(req, res, {
+      error: "Not authorized to download this result",
+      details: "Unauthorized attempt to stream result via token (inactive or missing user)",
+      userId: subjectId,
+      resultId: result.id,
+    });
+    return;
   }
 
-  const filePath = getFilePath(result.fileName);
+  if (!(await canAccessResult({ userId: user.id, username: user.username, role: user.role }, result))) {
+    await denyAccess(req, res, {
+      error: "Not authorized to download this result",
+      details: "Unauthorized attempt to stream result via token",
+      userId: subjectId,
+      resultId: result.id,
+    });
+    return;
+  }
+
+  let filePath: string;
+  try {
+    filePath = getFilePath(result.fileName);
+  } catch {
+    res.status(400).json({ error: "Invalid file path" });
+    return;
+  }
   if (!fs.existsSync(filePath)) {
     res.status(404).json({ error: "File not found" });
     return;
@@ -295,20 +266,122 @@ router.get("/physician/file/:token", async (req, res): Promise<void> => {
   const mimeMap: Record<string, string> = {
     pdf: "application/pdf",
     jpeg: "image/jpeg",
-    jpg: "image/jpeg",
     png: "image/png",
   };
-
   const disposition = inline === "1" ? "inline" : "attachment";
-
   res.setHeader("Content-Type", mimeMap[result.fileType] ?? "application/octet-stream");
   res.setHeader(
     "Content-Disposition",
     `${disposition}; filename="${encodeURIComponent(result.originalFileName)}"`,
   );
-
-  const stream = fs.createReadStream(filePath);
-  stream.pipe(res);
+  fs.createReadStream(filePath).pipe(res);
 });
+
+router.get(
+  "/physician/patients/:patientId/prescriptions",
+  requireAuth,
+  requireRole("physician"),
+  async (req, res): Promise<void> => {
+    const patientId = parseInt(String(req.params.patientId), 10);
+    if (!Number.isFinite(patientId) || patientId <= 0) {
+      res.status(400).json({ error: "Invalid patientId" });
+      return;
+    }
+
+    const access = await assertPhysicianMayAccessPatient(req.user!, patientId);
+    if (!access.ok) {
+      if (access.reason === "not_found") {
+        res.status(404).json({ error: "Patient not found" });
+        return;
+      }
+      await denyAccess(req, res, {
+        error: "Forbidden",
+        details: "Unauthorized attempt to list prescriptions for unassigned patient",
+      });
+      return;
+    }
+
+    if (!(await prescriptionsRepo.schemaReady())) {
+      res.status(503).json({ error: PRESCRIPTION_SCHEMA_MSG });
+      return;
+    }
+
+    const rows = await prescriptionsRepo.listPrescriptionsForPatient(patientId);
+    await logAudit({
+      action: "view",
+      req,
+      userId: req.user!.userId,
+      userName: req.user!.username,
+      details: `prescription_list patientId=${patientId}`,
+    });
+    res.json(rows.map(formatPrescription));
+  },
+);
+
+router.post(
+  "/physician/patients/:patientId/prescriptions",
+  requireAuth,
+  requireRole("physician"),
+  async (req, res): Promise<void> => {
+    const patientId = parseInt(String(req.params.patientId), 10);
+    if (!Number.isFinite(patientId) || patientId <= 0) {
+      res.status(400).json({ error: "Invalid patientId" });
+      return;
+    }
+
+    const access = await assertPhysicianMayAccessPatient(req.user!, patientId);
+    if (!access.ok) {
+      if (access.reason === "not_found") {
+        res.status(404).json({ error: "Patient not found" });
+        return;
+      }
+      await denyAccess(req, res, {
+        error: "Forbidden",
+        details: "Unauthorized attempt to create prescription for unassigned patient",
+      });
+      return;
+    }
+
+    if (!(await prescriptionsRepo.schemaReady())) {
+      res.status(503).json({ error: PRESCRIPTION_SCHEMA_MSG });
+      return;
+    }
+
+    const parsed = parsePrescriptionCreateItems(req.body?.items);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    const created = await withTransaction(async (tx) =>
+      prescriptionsRepo.createPrescription(
+        {
+          patientId,
+          physicianId: req.user!.userId,
+          diagnosisOrIndication: trimNullable(req.body?.diagnosisOrIndication, 500),
+          generalInstructions: trimNullable(req.body?.generalInstructions, 4000),
+          notes: trimNullable(req.body?.notes, 4000),
+          items: parsed.items,
+        },
+        tx,
+      ),
+    );
+
+    await logAudit({
+      action: "edit",
+      req,
+      userId: req.user!.userId,
+      userName: req.user!.username,
+      details: `prescription_created id=${created.id}`,
+    });
+
+    void notifyPatientPrescriptionCreated({
+      prescriptionId: created.id,
+      patientId,
+    }).catch(() => undefined);
+
+    res.status(201).json(formatPrescription(created));
+  },
+);
 
 export default router;

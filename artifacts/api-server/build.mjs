@@ -61,6 +61,7 @@ async function buildAll() {
       "@grpc/*",
       "@swc/*",
       "@aws-sdk/*",
+      // Bundled tedious still require()s these at runtime; declare them on this package.
       "@azure/*",
       "@opentelemetry/*",
       "@google-cloud/*",

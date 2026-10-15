@@ -1,26 +1,20 @@
-import path from "path";
-import fs from "fs";
+import path from "node:path";
 import multer from "multer";
+import {
+  ALLOWED_EXTENSIONS,
+  ALLOWED_MIME_TYPES,
+  deleteStoredFile,
+  deleteTempUpload,
+  ensureStorageReady,
+  fileTypeFromExtension,
+  getMaxFileBytes,
+  getStoredFilePath,
+  newTempFilename,
+  storedFileExists,
+  validateUploadClaims,
+} from "@workspace/db";
 
-const workspaceRoot = process.cwd().endsWith(path.join("artifacts", "api-server"))
-  ? path.resolve(process.cwd(), "../..")
-  : process.cwd();
-
-export const uploadsDir = path.resolve(workspaceRoot, "artifacts/api-server/uploads");
-
-// Ensure uploads directory exists
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-const ALLOWED_MIME_TYPES = new Set([
-  "application/pdf",
-  "image/jpeg",
-  "image/jpg",
-  "image/png",
-]);
-
-const ALLOWED_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
+ensureStorageReady();
 
 export function getFileType(mimetype: string): "pdf" | "jpeg" | "png" | null {
   if (mimetype === "application/pdf") return "pdf";
@@ -31,21 +25,34 @@ export function getFileType(mimetype: string): "pdf" | "jpeg" | "png" | null {
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
-    cb(null, uploadsDir);
+    try {
+      const root = ensureStorageReady();
+      cb(null, path.join(root, "tmp"));
+    } catch (err) {
+      cb(err as Error, "");
+    }
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, unique);
+    const fileType = fileTypeFromExtension(file.originalname);
+    if (!fileType) {
+      cb(new Error("Invalid file type. Only PDF, JPEG, and PNG are allowed."), "");
+      return;
+    }
+    cb(null, newTempFilename(fileType));
   },
 });
 
 export const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
+  limits: { fileSize: getMaxFileBytes() },
   fileFilter: (_req, file, cb) => {
+    const claims = validateUploadClaims(file.originalname, file.mimetype);
     const ext = path.extname(file.originalname).toLowerCase();
-    if (ALLOWED_MIME_TYPES.has(file.mimetype) && ALLOWED_EXTENSIONS.has(ext)) {
+    if (
+      claims.ok &&
+      ALLOWED_MIME_TYPES.has(file.mimetype) &&
+      ALLOWED_EXTENSIONS.has(ext)
+    ) {
       cb(null, true);
     } else {
       cb(new Error("Invalid file type. Only PDF, JPEG, and PNG are allowed."));
@@ -54,12 +61,11 @@ export const upload = multer({
 });
 
 export function getFilePath(fileName: string): string {
-  return path.resolve(uploadsDir, fileName);
+  return getStoredFilePath(fileName);
 }
 
 export function deleteFile(fileName: string): void {
-  const filePath = getFilePath(fileName);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
+  deleteStoredFile(fileName);
 }
+
+export { deleteTempUpload, storedFileExists };

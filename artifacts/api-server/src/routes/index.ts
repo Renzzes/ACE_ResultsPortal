@@ -9,6 +9,12 @@ import physicianRouter from "./physician";
 import auditRouter from "./audit";
 import dashboardRouter from "./dashboard";
 import archiveRouter from "./archive";
+import adminRouter from "./admin";
+import notificationsRouter from "./notifications";
+import announcementsRouter from "./announcements";
+import messagesRouter from "./messages";
+import portalMessagesRouter from "./portal-messages";
+import supportRouter from "./support";
 
 const router: IRouter = Router();
 
@@ -18,9 +24,15 @@ router.use(usersRouter);
 router.use(patientsRouter);
 router.use(resultsRouter);
 router.use(portalRouter);
+router.use(portalMessagesRouter);
 router.use(physicianRouter);
 router.use(auditRouter);
 router.use(dashboardRouter);
 router.use(archiveRouter);
+router.use(adminRouter);
+router.use(notificationsRouter);
+router.use(announcementsRouter);
+router.use(messagesRouter);
+router.use(supportRouter);
 
 export default router;

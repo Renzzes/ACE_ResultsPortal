@@ -3,8 +3,12 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
+    "preinstall": "node -e \"const ua=process.env.npm_config_user_agent||''; if(!ua.includes('pnpm')){console.error('Use pnpm instead'); process.exit(1)}\"",
+    "dev": "pnpm --parallel --filter @workspace/api-server --filter @workspace/ace-results-portal run dev",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "build:production": "pnpm run stamp:version && pnpm --filter @workspace/ace-results-portal run build && pnpm --filter @workspace/api-server run build && node scripts/assemble-dist.mjs",
+    "stamp:version": "node scripts/stamp-version.mjs",
+    "verify": "node scripts/verify-production-build.mjs",
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },

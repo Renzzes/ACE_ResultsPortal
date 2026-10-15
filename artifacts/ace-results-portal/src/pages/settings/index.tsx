@@ -2,11 +2,10 @@ import { useState } from "react";
 import { useChangePassword } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
-import { Eye, EyeOff } from "lucide-react";
 
 const ROLE_LABELS: Record<string, string> = {
   super_admin: "Super Admin", medical_records: "Medical Records",
@@ -16,8 +15,6 @@ const ROLE_LABELS: Record<string, string> = {
 export default function SettingsPage() {
   const { auth } = useAuth();
   const { toast } = useToast();
-  const [showCurrent, setShowCurrent] = useState(false);
-  const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
 
   const changePassword = useChangePassword();
@@ -29,24 +26,19 @@ export default function SettingsPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.currentPassword || !form.newPassword || !form.confirmPassword) {
-      toast({ title: "Please fill in all fields", variant: "destructive" });
-      return;
-    }
-    if (form.newPassword.length < 8) {
-      toast({ title: "New password must be at least 8 characters", variant: "destructive" });
-      return;
-    }
     if (form.newPassword !== form.confirmPassword) {
       toast({ title: "Passwords do not match", variant: "destructive" });
       return;
     }
-
+    if (form.newPassword.length < 8) {
+      toast({ title: "Password must be at least 8 characters", variant: "destructive" });
+      return;
+    }
     changePassword.mutate(
       { data: { currentPassword: form.currentPassword, newPassword: form.newPassword } },
       {
         onSuccess: () => {
-          toast({ title: "Password changed successfully" });
+          toast({ title: "Password updated successfully" });
           setForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
         },
         onError: (err: any) => {
@@ -57,8 +49,8 @@ export default function SettingsPage() {
   };
 
   return (
-    <StaffLayout>
-      <div className="max-w-lg space-y-6">
+    <StaffLayout title="Settings">
+      <div className="w-full max-w-3xl space-y-6">
         <div>
           <h2 className="text-3xl font-bold tracking-tight text-primary">Settings</h2>
           <p className="text-muted-foreground">Manage your account preferences</p>
@@ -93,25 +85,15 @@ export default function SettingsPage() {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="currentPw">Current Password</Label>
-              <div className="relative">
-                <Input id="currentPw" type={showCurrent ? "text" : "password"} {...field("currentPassword")} />
-                <button type="button" onClick={() => setShowCurrent(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                  {showCurrent ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
+              <PasswordInput id="currentPw" {...field("currentPassword")} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="newPw">New Password</Label>
-              <div className="relative">
-                <Input id="newPw" type={showNew ? "text" : "password"} {...field("newPassword")} />
-                <button type="button" onClick={() => setShowNew(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                  {showNew ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
+              <PasswordInput id="newPw" {...field("newPassword")} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="confirmPw">Confirm New Password</Label>
-              <Input id="confirmPw" type="password" {...field("confirmPassword")} />
+              <PasswordInput id="confirmPw" {...field("confirmPassword")} />
             </div>
             <Button type="submit" disabled={changePassword.isPending} className="w-full">
               {changePassword.isPending ? "Updating..." : "Update Password"}

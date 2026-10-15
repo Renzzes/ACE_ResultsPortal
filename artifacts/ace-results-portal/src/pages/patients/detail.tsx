@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import {
   useGetPatient,
@@ -10,44 +11,194 @@ import {
   useGetResultDownloadUrl,
   getGetResultDownloadUrlQueryKey,
   useUpdateResult,
-  customFetch,
+  useUpdatePatient,
+  getListArchivedResultsQueryKey,
+  getGetDashboardStatsQueryKey,
 } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
-import { ArrowLeft, Copy, Check, RefreshCw, Upload, Download, Archive, Stethoscope, Plus, X } from "lucide-react";
+import { copyText } from "@/lib/copy-text";
+import {
+  canEditPatientsUi,
+  canRegenerateAccessCodeUi,
+  canUploadResultFileUi,
+  canUploadResultsUi,
+  useDebouncedValue,
+} from "@/lib/staff-permissions";
+import { UploadResultDialog } from "@/components/staff/upload-result-dialog";
+import { StaffResultPreviewDialog, type StaffPreviewResult } from "@/components/staff/document-preview";
+import {
+  ArrowLeft,
+  Archive,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  ClipboardList,
+  Copy,
+  Eye,
+  FileText,
+  Filter,
+  History,
+  KeyRound,
+  MessageSquare,
+  MoreVertical,
+  Pencil,
+  Printer,
+  RefreshCw,
+  Search,
+  Shield,
+  Stethoscope,
+  Upload,
+  UserRound,
+} from "lucide-react";
 
 const CATEGORY_LABELS: Record<string, string> = {
-  laboratory: "Laboratory", radiology: "Radiology", ultrasound: "Ultrasound",
-  ct_scan: "CT Scan", mri: "MRI", ecg: "ECG", echo_2d: "2D Echo",
-  rehabilitation: "Rehabilitation", other: "Other Diagnostics",
+  laboratory: "Laboratory",
+  radiology: "Radiology",
+  ultrasound: "Ultrasound",
+  ct_scan: "CT Scan",
+  mri: "MRI",
+  ecg: "ECG",
+  echo_2d: "2D Echo",
+  rehabilitation: "Rehabilitation",
+  other: "Other Diagnostics",
 };
 
-const CATEGORY_COLORS: Record<string, string> = {
-  laboratory: "bg-blue-100 text-blue-800", radiology: "bg-purple-100 text-purple-800",
-  ultrasound: "bg-teal-100 text-teal-800", ct_scan: "bg-indigo-100 text-indigo-800",
-  mri: "bg-violet-100 text-violet-800", ecg: "bg-orange-100 text-orange-800",
-  echo_2d: "bg-pink-100 text-pink-800", rehabilitation: "bg-green-100 text-green-800",
-  other: "bg-gray-100 text-gray-800",
+type DetailTab = "overview" | "results";
+
+type ResultPhysician = {
+  id: number;
+  name: string;
 };
 
-const STATUS_CLASSES: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-800",
-  released: "bg-green-100 text-green-800",
-  archived: "bg-slate-100 text-slate-600",
+type StaffResultRow = {
+  id: number;
+  originalFileName: string;
+  fileType: string;
+  category: string;
+  status: string;
+  uploadedAt: string;
+  releaseOption?: string;
+  uploadedByName?: string;
+  dateReleased?: string | null;
+  scheduledReleaseDate?: string | null;
+  remarks?: string | null;
+  assignedPhysicians?: ResultPhysician[];
+  reviews?: Array<{
+    physicianId: number;
+    physicianName: string;
+    reviewed: boolean;
+    reviewedAt: string | null;
+    comment: string | null;
+  }>;
 };
 
-interface AssignedPhysician { id: number; name: string; username: string; assignedAt: string }
-interface PhysicianSearchResult { id: number; name: string; username: string }
+function ageFromDob(dob: string): number | null {
+  const born = new Date(dob);
+  if (Number.isNaN(born.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - born.getFullYear();
+  const m = now.getMonth() - born.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < born.getDate())) age -= 1;
+  return Math.max(0, age);
+}
 
-function DownloadButton({ resultId }: { resultId: number }) {
-  const [enabled, setEnabled] = useState(false);
-  const { data } = useGetResultDownloadUrl(
-    resultId,
-    { query: { enabled, queryKey: getGetResultDownloadUrlQueryKey(resultId) } }
+function initials(lastName: string, firstName: string) {
+  return `${(firstName?.[0] ?? "").toUpperCase()}${(lastName?.[0] ?? "").toUpperCase()}` || "?";
+}
+
+function formatDob(dob: string) {
+  const d = new Date(dob);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+
+function formatDateTime(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatShortDate(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+
+function resultHasReview(r: StaffResultRow) {
+  return Array.isArray(r.reviews) && r.reviews.some((rev) => rev.reviewed);
+}
+
+function primaryReview(r: StaffResultRow) {
+  if (!Array.isArray(r.reviews)) return null;
+  return r.reviews.find((rev) => rev.reviewed) ?? null;
+}
+
+function statusLabel(r: StaffResultRow) {
+  if (r.status === "archived") return "Archived";
+  if (r.status === "released") return "Released";
+  if (resultHasReview(r)) return "Reviewed";
+  return "Pending Review";
+}
+
+function statusBadgeClass(label: string) {
+  if (label === "Pending Review") return "bg-amber-100 text-amber-800";
+  if (label === "Reviewed") return "bg-[hsl(var(--st-green-soft))] text-[hsl(var(--st-green))]";
+  if (label === "Released") return "bg-emerald-100 text-emerald-800";
+  return "bg-slate-100 text-slate-600";
+}
+
+function InfoRow({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-[hsl(var(--st-border))] py-2.5 last:border-b-0">
+      <dt className="text-xs font-medium text-[hsl(var(--st-muted))]">{label}</dt>
+      <dd className="max-w-[60%] text-right text-sm font-semibold text-[hsl(var(--st-text))] break-words">
+        {value}
+      </dd>
+    </div>
   );
+}
+
+function DownloadMenuItem({ resultId }: { resultId: number }) {
+  const [enabled, setEnabled] = useState(false);
+  const { data } = useGetResultDownloadUrl(resultId, {
+    query: { enabled, queryKey: getGetResultDownloadUrlQueryKey(resultId) },
+  });
 
   useEffect(() => {
     if (data?.url && enabled) {
@@ -57,169 +208,9 @@ function DownloadButton({ resultId }: { resultId: number }) {
   }, [data?.url, enabled]);
 
   return (
-    <Button size="sm" variant="ghost" onClick={() => setEnabled(true)} title="Download">
-      <Download className="w-4 h-4" />
-    </Button>
-  );
-}
-
-function PhysicianSection({
-  patientId,
-  canManage,
-}: {
-  patientId: number;
-  canManage: boolean;
-}) {
-  const { toast } = useToast();
-  const [physicians, setPhysicians] = useState<AssignedPhysician[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [searchResults, setSearchResults] = useState<PhysicianSearchResult[]>([]);
-  const [showDrop, setShowDrop] = useState(false);
-  const [adding, setAdding] = useState(false);
-
-  const loadPhysicians = async () => {
-    try {
-      const data = await customFetch<AssignedPhysician[]>(`/api/patients/${patientId}/physicians`);
-      setPhysicians(data);
-    } catch {
-      /* ignore — leave list as-is */
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => { loadPhysicians(); }, [patientId]);
-
-  useEffect(() => {
-    if (!search.trim()) { setSearchResults([]); return; }
-    const t = setTimeout(async () => {
-      try {
-        const data = await customFetch<PhysicianSearchResult[]>(
-          `/api/physicians?search=${encodeURIComponent(search)}`,
-        );
-        setSearchResults(data);
-      } catch {
-        /* ignore search errors */
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [search]);
-
-  const handleAssign = async (physician: PhysicianSearchResult) => {
-    setAdding(true);
-    setShowDrop(false);
-    setSearch("");
-    try {
-      await customFetch(`/api/patients/${patientId}/physicians`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ physicianId: physician.id }),
-      });
-      toast({ title: `${physician.name} assigned to patient` });
-      loadPhysicians();
-    } catch (err) {
-      toast({
-        title: err instanceof Error ? err.message : "Failed to assign physician",
-        variant: "destructive",
-      });
-    } finally {
-      setAdding(false);
-    }
-  };
-
-  const handleRemove = async (physicianId: number, name: string) => {
-    try {
-      await customFetch(`/api/patients/${patientId}/physicians/${physicianId}`, {
-        method: "DELETE",
-      });
-      toast({ title: `${name} removed from patient` });
-      loadPhysicians();
-    } catch {
-      toast({ title: "Failed to remove physician", variant: "destructive" });
-    }
-  };
-
-  if (loading) return null;
-
-  return (
-    <div className="bg-card border border-border rounded-xl p-5 shadow-sm space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Stethoscope className="w-4 h-4 text-muted-foreground" />
-          <h3 className="font-semibold">Attending Physician(s)</h3>
-        </div>
-      </div>
-
-      {physicians.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No physician assigned yet.</p>
-      ) : (
-        <div className="space-y-2">
-          {physicians.map((p) => (
-            <div key={p.id} className="flex items-center justify-between bg-muted/40 rounded-lg px-3 py-2.5">
-              <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 bg-primary/10 rounded-full flex items-center justify-center">
-                  <Stethoscope className="w-3.5 h-3.5 text-primary" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium">{p.name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    Assigned {new Date(p.assignedAt).toLocaleDateString("en-PH")}
-                  </p>
-                </div>
-              </div>
-              {canManage && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground hover:text-destructive"
-                  onClick={() => handleRemove(p.id, p.name)}
-                  title="Remove physician"
-                >
-                  <X className="w-4 h-4" />
-                </Button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {canManage && (
-        <div className="relative">
-          <div className="flex gap-2">
-            <Input
-              placeholder="Search and add physician..."
-              value={search}
-              onChange={(e) => { setSearch(e.target.value); setShowDrop(true); }}
-              onFocus={() => setShowDrop(true)}
-              onBlur={() => setTimeout(() => setShowDrop(false), 150)}
-              className="text-sm"
-            />
-            <Button type="button" size="sm" variant="outline" disabled={adding} className="gap-1 flex-shrink-0">
-              <Plus className="w-3.5 h-3.5" />Add
-            </Button>
-          </div>
-          {showDrop && searchResults.length > 0 && (
-            <div className="absolute z-10 top-full mt-1 left-0 right-0 bg-popover border border-border rounded-md shadow-lg max-h-40 overflow-y-auto">
-              {searchResults
-                .filter((r) => !physicians.some((p) => p.id === r.id))
-                .map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    className="w-full text-left px-3 py-2 hover:bg-muted transition-colors text-sm flex items-center gap-2"
-                    onMouseDown={() => handleAssign(p)}
-                  >
-                    <Stethoscope className="w-3 h-3 text-muted-foreground" />
-                    {p.name}
-                    <span className="text-xs text-muted-foreground">@{p.username}</span>
-                  </button>
-                ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+    <DropdownMenuItem onClick={() => setEnabled(true)}>
+      Download file
+    </DropdownMenuItem>
   );
 }
 
@@ -227,192 +218,965 @@ export default function PatientDetailPage() {
   const [, params] = useRoute("/patients/:id");
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const { auth } = useAuth();
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [revealedCode, setRevealedCode] = useState<string | null>(null);
+  const [regenOpen, setRegenOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [viewCodeOpen, setViewCodeOpen] = useState(false);
+  const [preview, setPreview] = useState<StaffPreviewResult | null>(null);
+  const [tab, setTab] = useState<DetailTab>("overview");
+  const [resultSearch, setResultSearch] = useState("");
+  const debouncedResultSearch = useDebouncedValue(resultSearch, 250);
+  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "reviewed" | "released" | "archived">("all");
+  const [page, setPage] = useState(1);
+  const pageSize = 5;
+  const [form, setForm] = useState({
+    lastName: "",
+    firstName: "",
+    middleName: "",
+    dateOfBirth: "",
+    mobileNumber: "",
+    email: "",
+  });
+
   const patientId = parseInt(params?.id ?? "0", 10);
+  const role = auth.user?.role;
+  const canEditInfo = canEditPatientsUi(role);
+  const canRegen = canRegenerateAccessCodeUi(role);
+  const canMutateResults = canUploadResultsUi(role);
+  const canUpload = canUploadResultFileUi(role, auth.user?.permissions);
+  const { data: patient, isLoading, isError, refetch: refetchPatient } = useGetPatient(patientId, {
+    query: { queryKey: getGetPatientQueryKey(patientId), enabled: !!patientId },
+  });
 
-  const isAdmin = auth.user?.role === "super_admin";
-  const isMedicalRecords = auth.user?.role === "medical_records";
-  const canManagePhysicians = isAdmin || isMedicalRecords;
-  const isPhysician = auth.user?.role === "physician";
-
-  const { data: patient, isLoading, refetch: refetchPatient } = useGetPatient(
-    patientId,
-    { query: { queryKey: getGetPatientQueryKey(patientId), enabled: !!patientId } }
-  );
-
-  const { data: results, refetch: refetchResults } = useListPatientResultsStaff(
-    patientId,
-    { query: { queryKey: getListPatientResultsStaffQueryKey(patientId), enabled: !!patientId } }
-  );
+  const { data: results, refetch: refetchResults } = useListPatientResultsStaff(patientId, {
+    query: { queryKey: getListPatientResultsStaffQueryKey(patientId), enabled: !!patientId },
+  });
 
   const regenerate = useRegenerateAccessCode();
   const releaseResult = useReleaseResult();
   const archiveResult = useUpdateResult();
+  const updatePatient = useUpdatePatient();
 
-  const copyCode = () => {
+  useEffect(() => {
     if (!patient) return;
-    navigator.clipboard.writeText(patient.accessCode).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+    setForm({
+      lastName: patient.lastName ?? "",
+      firstName: patient.firstName ?? "",
+      middleName: patient.middleName ?? "",
+      dateOfBirth: String(patient.dateOfBirth ?? "").slice(0, 10),
+      mobileNumber: patient.mobileNumber ?? "",
+      email: patient.email ?? "",
     });
+  }, [patient]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedResultSearch, statusFilter]);
+
+  const resultList = useMemo(
+    () => (Array.isArray(results) ? results : []) as StaffResultRow[],
+    [results],
+  );
+
+  /** Distinct physicians assigned to this patient's result files (result_physicians). */
+  const resultPhysicians = useMemo(() => {
+    const map = new Map<number, { id: number; name: string; resultCount: number }>();
+    for (const row of resultList) {
+      const assigned = row.assignedPhysicians ?? [];
+      for (const physician of assigned) {
+        if (typeof physician.id !== "number" || !physician.name) continue;
+        const existing = map.get(physician.id);
+        if (existing) {
+          existing.resultCount += 1;
+        } else {
+          map.set(physician.id, { id: physician.id, name: physician.name, resultCount: 1 });
+        }
+      }
+    }
+    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [resultList]);
+
+  const filteredResults = useMemo(() => {
+    const q = debouncedResultSearch.trim().toLowerCase();
+    return resultList.filter((r) => {
+      const label = statusLabel(r);
+      if (statusFilter === "pending" && label !== "Pending Review") return false;
+      if (statusFilter === "reviewed" && label !== "Reviewed") return false;
+      if (statusFilter === "released" && label !== "Released") return false;
+      if (statusFilter === "archived" && label !== "Archived") return false;
+      if (!q) return true;
+      const hay = `${r.originalFileName} ${CATEGORY_LABELS[r.category] ?? r.category} ${r.remarks ?? ""} ${label}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [resultList, debouncedResultSearch, statusFilter]);
+
+  const copyCode = async (code: string) => {
+    setCopyError(null);
+    const ok = await copyText(code);
+    if (!ok) {
+      setCopyError("Unable to copy automatically. Please copy the access code manually.");
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
 
   const handleRegenerate = () => {
-    regenerate.mutate({ id: patientId }, {
-      onSuccess: () => { toast({ title: "Access code regenerated" }); refetchPatient(); },
-      onError: () => toast({ title: "Failed", variant: "destructive" }),
-    });
+    regenerate.mutate(
+      { id: patientId },
+      {
+        onSuccess: (data) => {
+          if (data.accessCode) setRevealedCode(data.accessCode);
+          setRegenOpen(false);
+          toast({
+            title: "Access code regenerated",
+            description: "Save this access code. It will only be shown once.",
+          });
+        },
+        onError: () =>
+          toast({
+            title: "You don't have permission to perform this action.",
+            variant: "destructive",
+          }),
+      },
+    );
   };
 
   const handleRelease = (resultId: number) => {
-    releaseResult.mutate({ id: resultId, data: { releaseOption: "immediate" } }, {
-      onSuccess: () => { toast({ title: "Result released" }); refetchResults(); },
-      onError: () => toast({ title: "Failed to release", variant: "destructive" }),
-    });
+    releaseResult.mutate(
+      { id: resultId, data: { releaseOption: "immediate" } },
+      {
+        onSuccess: () => {
+          toast({ title: "Result released" });
+          void refetchResults();
+        },
+        onError: () =>
+          toast({ title: "You don't have permission to perform this action.", variant: "destructive" }),
+      },
+    );
   };
 
   const handleArchive = (resultId: number) => {
-    archiveResult.mutate({ id: resultId, data: { status: "archived" } }, {
-      onSuccess: () => { toast({ title: "Result archived" }); refetchResults(); },
-      onError: () => toast({ title: "Failed to archive", variant: "destructive" }),
+    archiveResult.mutate(
+      { id: resultId, data: { status: "archived" } },
+      {
+        onSuccess: () => {
+          toast({ title: "Result archived" });
+          void refetchResults();
+          void queryClient.invalidateQueries({ queryKey: getListArchivedResultsQueryKey() });
+          void queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
+        },
+        onError: () =>
+          toast({ title: "You don't have permission to perform this action.", variant: "destructive" }),
+      },
+    );
+  };
+
+  const handleSaveInfo = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEditInfo) return;
+    updatePatient.mutate(
+      {
+        id: patientId,
+        data: {
+          lastName: form.lastName,
+          firstName: form.firstName,
+          middleName: form.middleName || null,
+          dateOfBirth: form.dateOfBirth,
+          mobileNumber: form.mobileNumber || null,
+          email: form.email || null,
+        },
+      },
+      {
+        onSuccess: () => {
+          toast({ title: "Patient details saved" });
+          setEditOpen(false);
+          void refetchPatient();
+        },
+        onError: () => {
+          toast({
+            title: "Could not save patient",
+            description: "You don't have permission to perform this action.",
+            variant: "destructive",
+          });
+        },
+      },
+    );
+  };
+
+  const printPatientInfo = () => {
+    window.print();
+  };
+
+  const openViewAccessCode = () => {
+    const code = revealedCode ?? (patient as { accessCode?: string | null } | undefined)?.accessCode;
+    if (code) {
+      setViewCodeOpen(true);
+      return;
+    }
+    toast({
+      title: "Access code is on file (hidden)",
+      description: canRegen
+        ? "Regenerate the access code to view a new plaintext code. The stored hash is never shown."
+        : "The stored access code cannot be displayed. Ask an authorized staff member to regenerate it if needed.",
     });
   };
 
-  if (isLoading) return <StaffLayout><div className="text-center py-16 text-muted-foreground">Loading...</div></StaffLayout>;
-  if (!patient) return <StaffLayout><div className="text-center py-16">Patient not found.</div></StaffLayout>;
+  if (isLoading) {
+    return (
+      <StaffLayout showSearch={false}>
+        <div className="space-y-4">
+          <div className="h-20 animate-pulse rounded-xl bg-[hsl(var(--st-green-soft))]" />
+          <div className="h-48 animate-pulse rounded-xl bg-[hsl(var(--st-green-soft))]/70" />
+        </div>
+      </StaffLayout>
+    );
+  }
 
-  const resultList = Array.isArray(results) ? results : [];
-  const assignedPhysicians: Array<{ id: number; name: string }> = (patient as any).assignedPhysicians ?? [];
+  if (isError) {
+    return (
+      <StaffLayout showSearch={false}>
+        <div className="space-y-3 py-16 text-center">
+          <p className="st-muted">Could not load this patient.</p>
+          <Button variant="outline" onClick={() => void refetchPatient()}>
+            Retry
+          </Button>
+        </div>
+      </StaffLayout>
+    );
+  }
+
+  if (!patient) {
+    return (
+      <StaffLayout showSearch={false}>
+        <div className="py-16 text-center">Patient not found.</div>
+      </StaffLayout>
+    );
+  }
+
+  const pendingCount = resultList.filter((r) => r.status === "pending" && !resultHasReview(r)).length;
+  const reviewedCount = resultList.filter((r) => r.status !== "archived" && resultHasReview(r) && r.status !== "released").length;
+  const releasedCount = resultList.filter((r) => r.status === "released").length;
+  const archivedCount = resultList.filter((r) => r.status === "archived").length;
+  const age = ageFromDob(patient.dateOfBirth);
+  const fullName = `${patient.lastName}, ${patient.firstName}${patient.middleName ? ` ${patient.middleName}` : ""}`;
+  const portalActive = Boolean((patient as { portalActive?: boolean }).portalActive);
+  const visibleCode = revealedCode ?? (patient as { accessCode?: string | null }).accessCode ?? null;
+
+  const totalPages = Math.max(1, Math.ceil(filteredResults.length / pageSize) || 1);
+  const safePage = Math.min(page, totalPages);
+  const pageRows = filteredResults.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const rangeStart = filteredResults.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const rangeEnd = Math.min(safePage * pageSize, filteredResults.length);
+
+  const openPreview = (r: StaffResultRow) => {
+    setPreview({
+      id: r.id,
+      originalFileName: r.originalFileName,
+      fileType: r.fileType,
+      category: r.category,
+      status: r.status,
+      patientName: fullName,
+      patientHisId: patient.patientHisId,
+      uploadedAt: r.uploadedAt,
+      releaseOption: r.releaseOption,
+      uploadedByName: r.uploadedByName,
+      dateReleased: r.dateReleased,
+      scheduledReleaseDate: r.scheduledReleaseDate,
+      remarks: r.remarks,
+      reviews: r.reviews,
+    });
+  };
+
+  const tabs: Array<{
+    id: DetailTab | "history";
+    label: string;
+    icon: typeof FileText;
+  }> = [
+    { id: "overview", label: "Overview", icon: ClipboardList },
+    { id: "results", label: "Results", icon: FileText },
+    { id: "history", label: "Patient History", icon: History },
+  ];
+
+  const onTabClick = (id: (typeof tabs)[number]["id"]) => {
+    if (id === "overview" || id === "results") {
+      setTab(id);
+      return;
+    }
+    if (id === "history") {
+      setLocation(`/patients/history?search=${encodeURIComponent(patient.patientHisId)}`);
+    }
+  };
 
   return (
-    <StaffLayout>
-      <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => setLocation("/patients")}>
-            <ArrowLeft className="w-4 h-4 mr-1" />Back
-          </Button>
-          <div>
-            <h2 className="text-3xl font-bold tracking-tight text-primary">
-              {patient.lastName}, {patient.firstName} {patient.middleName ?? ""}
-            </h2>
-            <p className="text-muted-foreground font-mono text-sm">{patient.patientHisId}</p>
-          </div>
-        </div>
-
-        {/* Patient Info Card */}
-        <div className="bg-card border border-border rounded-xl p-6 shadow-sm grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div>
-            <p className="text-xs text-muted-foreground">Date of Birth</p>
-            <p className="font-medium">{new Date(patient.dateOfBirth).toLocaleDateString("en-PH")}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Mobile</p>
-            <p className="font-medium">{patient.mobileNumber ?? "—"}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Email</p>
-            <p className="font-medium truncate">{patient.email ?? "—"}</p>
-          </div>
-          {!isPhysician && (
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Access Code</p>
-              <div className="flex items-center gap-1.5">
-                <span className="font-mono text-sm font-bold bg-muted px-2 py-1 rounded">{patient.accessCode}</span>
-                <button onClick={copyCode} className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-                  {copied ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5" />}
-                </button>
-                {!isPhysician && (
-                  <button onClick={handleRegenerate} className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors" title="Regenerate">
-                    <RefreshCw className="w-3.5 h-3.5" />
-                  </button>
-                )}
+    <StaffLayout showSearch={false} fill>
+      <div className="st-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto pb-4">
+        {/* Identity header */}
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 mb-1 h-8 px-2 text-[hsl(var(--st-text))]"
+              onClick={() => setLocation("/patients")}
+            >
+              <ArrowLeft className="mr-1.5 h-4 w-4" />
+              Back
+            </Button>
+            <div className="flex items-start gap-3">
+              <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-full bg-[#D6EAF8] text-lg font-bold text-[#1A5276]">
+                {initials(patient.lastName, patient.firstName)}
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="truncate text-2xl font-bold tracking-tight text-[hsl(var(--st-text))] sm:text-[1.75rem]">
+                    {fullName}
+                  </h1>
+                  <span className="font-mono text-sm font-semibold text-[hsl(var(--st-muted))]">
+                    HIS ID: {patient.patientHisId}
+                  </span>
+                  {portalActive ? (
+                    <span className="rounded-full bg-[hsl(var(--st-green-soft))] px-2 py-0.5 text-[11px] font-bold text-[hsl(var(--st-green))]">
+                      Portal Active
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-[hsl(var(--st-cream))] px-2 py-0.5 text-[11px] font-semibold text-[hsl(var(--st-muted))]">
+                      No Portal Account
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-sm st-muted">
+                  {age != null ? `${age} yrs (${formatDob(patient.dateOfBirth)})` : formatDob(patient.dateOfBirth)}
+                </p>
               </div>
             </div>
-          )}
-        </div>
+          </div>
 
-        {/* Physician Section */}
-        <PhysicianSection
-          patientId={patientId}
-          canManage={canManagePhysicians}
-        />
-
-        {/* Results */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xl font-semibold">Diagnostic Results</h3>
-            {!isPhysician && (
-              <Button onClick={() => setLocation(`/results/upload?patientId=${patientId}`)}>
-                <Upload className="w-4 h-4 mr-2" />Upload Result
+          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+            {canUpload ? (
+              <Button
+                type="button"
+                className="h-10 rounded-xl bg-[hsl(var(--st-green))] px-4 text-white hover:opacity-95"
+                onClick={() => setUploadOpen(true)}
+              >
+                <Upload className="mr-2 h-4 w-4" />
+                Upload Result
               </Button>
-            )}
-          </div>
-
-          <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
-            {resultList.length === 0 ? (
-              <div className="p-10 text-center text-muted-foreground">
-                <p>No results visible for your department yet.</p>
-                {!isPhysician && (
-                  <Button className="mt-4" variant="outline" onClick={() => setLocation(`/results/upload?patientId=${patientId}`)}>
-                    <Upload className="w-4 h-4 mr-2" />Upload Result
-                  </Button>
-                )}
-              </div>
-            ) : (
-              <table className="w-full text-sm">
-                <thead className="bg-muted/50 border-b border-border">
-                  <tr>
-                    <th className="text-left px-4 py-3 font-medium text-muted-foreground">Category</th>
-                    <th className="text-left px-4 py-3 font-medium text-muted-foreground">File</th>
-                    <th className="text-left px-4 py-3 font-medium text-muted-foreground">Status</th>
-                    <th className="text-left px-4 py-3 font-medium text-muted-foreground">Uploaded</th>
-                    <th className="text-right px-4 py-3 font-medium text-muted-foreground">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {resultList.map((r) => (
-                    <tr key={r.id} className="hover:bg-muted/30 transition-colors">
-                      <td className="px-4 py-3">
-                        <span className={`text-xs font-medium px-2 py-1 rounded-full ${CATEGORY_COLORS[r.category] ?? "bg-gray-100 text-gray-700"}`}>
-                          {CATEGORY_LABELS[r.category] ?? r.category}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="font-medium truncate max-w-[180px]">{r.originalFileName}</p>
-                        <p className="text-xs text-muted-foreground uppercase">{r.fileType}</p>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${STATUS_CLASSES[r.status] ?? ""}`}>
-                          {r.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {new Date(r.uploadedAt).toLocaleDateString("en-PH")}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center justify-end gap-1">
-                          <DownloadButton resultId={r.id} />
-                          {!isPhysician && r.status === "pending" && (
-                            <Button size="sm" variant="ghost" className="text-green-700" onClick={() => handleRelease(r.id)}>
-                              Release
-                            </Button>
-                          )}
-                          {!isPhysician && r.status !== "archived" && (
-                            <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => handleArchive(r.id)} title="Archive">
-                              <Archive className="w-4 h-4" />
-                            </Button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            ) : null}
+            {canRegen ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 rounded-xl border-[hsl(var(--st-border))] bg-white px-4 shadow-sm"
+                onClick={() => setRegenOpen(true)}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Regenerate Access Code
+              </Button>
+            ) : null}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-10 w-10 rounded-xl border-[hsl(var(--st-border))] bg-white"
+                  aria-label="More patient actions"
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="staff-shell">
+                <DropdownMenuItem onClick={printPatientInfo}>
+                  <Printer className="mr-2 h-4 w-4" />
+                  Print patient info
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={openViewAccessCode}>
+                  <KeyRound className="mr-2 h-4 w-4" />
+                  View access code
+                </DropdownMenuItem>
+                {canEditInfo ? (
+                  <DropdownMenuItem onClick={() => setEditOpen(true)}>
+                    <Pencil className="mr-2 h-4 w-4" />
+                    Edit information
+                  </DropdownMenuItem>
+                ) : null}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => setLocation(`/results?search=${encodeURIComponent(patient.patientHisId)}`)}
+                >
+                  Open in Results
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
+
+        {/* Tabs */}
+        <div className="flex flex-wrap gap-1 border-b border-[hsl(var(--st-border))]">
+          {tabs.map((t) => {
+            const Icon = t.icon;
+            const active = t.id === tab;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => onTabClick(t.id)}
+                className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-semibold transition-colors ${
+                  active
+                    ? "border-[hsl(var(--st-green))] text-[hsl(var(--st-green))]"
+                    : "border-transparent text-[hsl(var(--st-text))] hover:text-[hsl(var(--st-green))]"
+                }`}
+              >
+                <Icon className="h-4 w-4" />
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {(tab === "overview" || tab === "results") && (
+          <>
+            {tab === "overview" ? (
+              <div className="grid items-stretch gap-3 xl:grid-cols-[1.25fr_1fr_1fr]">
+                {/* Patient Information */}
+                <section className="st-card h-full rounded-2xl p-4 sm:p-5">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[hsl(var(--st-cream))]">
+                        <UserRound className="h-4 w-4 text-[hsl(var(--st-muted))]" />
+                      </span>
+                      <h2 className="text-base font-bold text-[hsl(var(--st-text))]">Patient Information</h2>
+                    </div>
+                    {canEditInfo ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 rounded-lg border-[hsl(var(--st-border))] bg-white"
+                        onClick={() => setEditOpen(true)}
+                      >
+                        <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                        Edit
+                      </Button>
+                    ) : null}
+                  </div>
+                  <dl>
+                    <InfoRow label="HIS ID" value={<span className="font-mono">{patient.patientHisId}</span>} />
+                    <InfoRow label="Last Name" value={patient.lastName || "—"} />
+                    <InfoRow label="First Name" value={patient.firstName || "—"} />
+                    <InfoRow label="Middle Name" value={patient.middleName || "—"} />
+                    <InfoRow
+                      label="Date of Birth"
+                      value={
+                        age != null
+                          ? `${formatDob(patient.dateOfBirth)} (${age} yrs)`
+                          : formatDob(patient.dateOfBirth)
+                      }
+                    />
+                    <InfoRow label="Mobile Number" value={patient.mobileNumber || "—"} />
+                    <InfoRow label="Email Address" value={patient.email || "—"} />
+                  </dl>
+                </section>
+
+                {/* Portal Account */}
+                <section className="st-card flex h-full flex-col rounded-2xl p-4 sm:p-5">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[hsl(var(--st-green-soft))]">
+                        <Shield className="h-4 w-4 text-[hsl(var(--st-green))]" />
+                      </span>
+                      <h2 className="text-base font-bold text-[hsl(var(--st-text))]">Portal Account</h2>
+                    </div>
+                    {portalActive ? (
+                      <span className="rounded-full bg-[hsl(var(--st-green-soft))] px-2 py-0.5 text-[11px] font-bold text-[hsl(var(--st-green))]">
+                        Active
+                      </span>
+                    ) : (
+                      <span className="rounded-full bg-[hsl(var(--st-cream))] px-2 py-0.5 text-[11px] font-semibold text-[hsl(var(--st-muted))]">
+                        Not linked
+                      </span>
+                    )}
+                  </div>
+                  <dl className="flex-1">
+                    <InfoRow
+                      label="Access Code"
+                      value={
+                        <span className="inline-flex items-center gap-1.5">
+                          {visibleCode ? (
+                            <>
+                              <span className="font-mono text-xs">{visibleCode}</span>
+                              <button
+                                type="button"
+                                className="rounded p-0.5 hover:bg-[hsl(var(--st-cream))]"
+                                aria-label="Copy access code"
+                                onClick={() => void copyCode(visibleCode)}
+                              >
+                                {copied ? <Check className="h-3.5 w-3.5 text-[hsl(var(--st-green))]" /> : <Copy className="h-3.5 w-3.5" />}
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-xs font-medium text-[hsl(var(--st-muted))]">On file (hidden)</span>
+                              <button
+                                type="button"
+                                className="rounded p-0.5 hover:bg-[hsl(var(--st-cream))]"
+                                aria-label="Access code info"
+                                onClick={openViewAccessCode}
+                              >
+                                <Copy className="h-3.5 w-3.5 text-[hsl(var(--st-muted))]" />
+                              </button>
+                            </>
+                          )}
+                        </span>
+                      }
+                    />
+                    <InfoRow label="Created" value={formatDateTime(patient.createdAt)} />
+                    <InfoRow label="Last Updated" value={formatDateTime(patient.updatedAt)} />
+                  </dl>
+                  {copyError ? <p className="mt-2 text-xs text-red-700">{copyError}</p> : null}
+                  {visibleCode ? (
+                    <p className="mt-2 text-[11px] text-[hsl(var(--st-maroon))]">
+                      Save this access code. It will only be shown once.
+                    </p>
+                  ) : null}
+                  {canRegen ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="mt-4 h-9 w-full rounded-xl border-[hsl(var(--st-border))] bg-white"
+                      onClick={() => setRegenOpen(true)}
+                    >
+                      <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                      Regenerate Access Code
+                    </Button>
+                  ) : null}
+                </section>
+
+                {/* Assigned Physician — derived from result file assignments */}
+                <section className="st-card flex h-full min-h-0 flex-col rounded-2xl p-4 sm:p-5">
+                  <div className="mb-3 flex items-center gap-2.5">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#D6EAF8]">
+                      <Stethoscope className="h-4 w-4 text-[#1A5276]" />
+                    </span>
+                    <div>
+                      <h2 className="text-base font-bold text-[hsl(var(--st-text))]">Assigned Physician</h2>
+                      <p className="text-[11px] st-muted">From uploaded result assignments</p>
+                    </div>
+                  </div>
+
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    {!results ? (
+                      <div className="h-24 animate-pulse rounded-xl bg-[hsl(var(--st-cream))]" />
+                    ) : resultPhysicians.length > 0 ? (
+                      <div className="space-y-2 overflow-y-auto">
+                        {resultPhysicians.map((p) => (
+                          <div
+                            key={p.id}
+                            className="rounded-xl border border-[hsl(var(--st-border))] bg-[hsl(var(--st-cream))]/50 px-3 py-3"
+                          >
+                            <p className="text-sm font-semibold text-[hsl(var(--st-text))]">{p.name}</p>
+                            <p className="mt-1 text-[11px] st-muted">
+                              Assigned to {p.resultCount} result{p.resultCount === 1 ? "" : "s"}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-[hsl(var(--st-border))] bg-[hsl(var(--st-cream))]/40 px-4 py-8 text-center">
+                        <Stethoscope className="mb-2 h-8 w-8 text-[hsl(var(--st-muted))]" />
+                        <p className="text-sm font-medium text-[hsl(var(--st-text))]">No physician assigned yet</p>
+                        <p className="mt-1 text-xs st-muted">
+                          Assign physicians when uploading a result. Each assignment links only to that file.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            ) : null}
+
+            {/* Diagnostic Results */}
+            <section className="st-card flex min-h-0 flex-col overflow-hidden rounded-2xl">
+              <div className="flex flex-col gap-3 border-b border-[hsl(var(--st-border))] px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-4 w-4 text-[hsl(var(--st-muted))]" />
+                    <h2 className="text-base font-bold text-[hsl(var(--st-text))]">Diagnostic Results</h2>
+                  </div>
+                  <p className="mt-0.5 text-xs st-muted">
+                    Total {resultList.length} · Pending {pendingCount} · Reviewed {reviewedCount} · Released{" "}
+                    {releasedCount} · Archived {archivedCount}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative min-w-[12rem] flex-1 sm:flex-none">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[hsl(var(--st-muted))]" />
+                    <Input
+                      value={resultSearch}
+                      onChange={(e) => setResultSearch(e.target.value)}
+                      placeholder="Search result..."
+                      className="h-9 rounded-lg pl-8"
+                      aria-label="Search results"
+                    />
+                  </div>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-9 rounded-lg border-[hsl(var(--st-border))] bg-white"
+                      >
+                        <Filter className="mr-1.5 h-3.5 w-3.5" />
+                        Filter
+                        {statusFilter !== "all" ? (
+                          <span className="ml-1.5 rounded-full bg-[hsl(var(--st-green-soft))] px-1.5 text-[10px] font-bold text-[hsl(var(--st-green))]">
+                            1
+                          </span>
+                        ) : null}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="staff-shell">
+                      {(
+                        [
+                          ["all", "All statuses"],
+                          ["pending", "Pending Review"],
+                          ["reviewed", "Reviewed"],
+                          ["released", "Released"],
+                          ["archived", "Archived"],
+                        ] as const
+                      ).map(([value, label]) => (
+                        <DropdownMenuItem key={value} onClick={() => setStatusFilter(value)}>
+                          {label}
+                          {statusFilter === value ? <Check className="ml-auto h-3.5 w-3.5" /> : null}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+
+              {pageRows.length === 0 ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-2 p-10 text-center">
+                  <p className="font-semibold text-[hsl(var(--st-text))]">No results found</p>
+                  <p className="text-sm st-muted">
+                    {debouncedResultSearch || statusFilter !== "all"
+                      ? "Try a different search or clear filters."
+                      : "Upload a diagnostic result for this patient."}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="st-scroll overflow-x-auto">
+                    <table className="w-full min-w-[64rem] text-sm">
+                      <thead className="bg-[hsl(var(--st-cream))]">
+                        <tr className="border-b border-[hsl(var(--st-border))]">
+                          {[
+                            "#",
+                            "Date Uploaded",
+                            "Study / Description",
+                            "Accession No.",
+                            "Status",
+                            "Reviewed By",
+                            "Doctor Comment",
+                            "Actions",
+                          ].map((h) => (
+                            <th
+                              key={h}
+                              className={`px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-[hsl(var(--st-muted))] ${
+                                h === "Actions" ? "text-right" : ""
+                              }`}
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[hsl(var(--st-border))]">
+                        {pageRows.map((r, idx) => {
+                          const review = primaryReview(r);
+                          const label = statusLabel(r);
+                          const rowNumber = (safePage - 1) * pageSize + idx + 1;
+                          return (
+                            <tr key={r.id} className="hover:bg-[hsl(var(--st-cream))]/60">
+                              <td className="px-3 py-3 text-[hsl(var(--st-muted))]">{rowNumber}</td>
+                              <td className="px-3 py-3 whitespace-nowrap text-[hsl(var(--st-text))]">
+                                {formatShortDate(r.uploadedAt)}
+                              </td>
+                              <td className="px-3 py-3">
+                                <div className="flex min-w-0 items-start gap-2">
+                                  <FileText className="mt-0.5 h-4 w-4 flex-shrink-0 text-[hsl(var(--st-maroon))]" />
+                                  <div className="min-w-0">
+                                    <p className="truncate font-semibold text-[hsl(var(--st-text))]">
+                                      {CATEGORY_LABELS[r.category] ?? r.category}
+                                    </p>
+                                    <p className="truncate text-xs st-muted">{r.originalFileName}</p>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 text-[hsl(var(--st-muted))]">—</td>
+                              <td className="px-3 py-3">
+                                <span
+                                  className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${statusBadgeClass(label)}`}
+                                >
+                                  {label}
+                                </span>
+                              </td>
+                              <td className="px-3 py-3">
+                                {review ? (
+                                  <div>
+                                    <p className="text-sm font-medium text-[hsl(var(--st-text))]">
+                                      {review.physicianName}
+                                    </p>
+                                    <p className="text-[11px] st-muted">
+                                      {review.reviewedAt ? formatDateTime(review.reviewedAt) : "—"}
+                                    </p>
+                                  </div>
+                                ) : (
+                                  <span className="st-muted">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-3">
+                                {review?.comment ? (
+                                  <p className="flex max-w-[14rem] items-start gap-1.5 truncate text-xs text-[hsl(var(--st-text))]">
+                                    <MessageSquare className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-[hsl(var(--st-muted))]" />
+                                    <span className="truncate">{review.comment}</span>
+                                  </p>
+                                ) : (
+                                  <span className="st-muted">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-3">
+                                <div className="flex items-center justify-end gap-1">
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 rounded-lg border-[hsl(var(--st-border))] bg-white"
+                                    onClick={() => openPreview(r)}
+                                  >
+                                    <Eye className="mr-1.5 h-3.5 w-3.5" />
+                                    View
+                                  </Button>
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8 rounded-lg"
+                                        aria-label={`More actions for ${r.originalFileName}`}
+                                      >
+                                        <MoreVertical className="h-4 w-4" />
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end" className="staff-shell">
+                                      <DropdownMenuItem onClick={() => openPreview(r)}>Open preview</DropdownMenuItem>
+                                      <DownloadMenuItem resultId={r.id} />
+                                      {canMutateResults && r.status === "pending" ? (
+                                        <DropdownMenuItem onClick={() => handleRelease(r.id)}>
+                                          Release
+                                        </DropdownMenuItem>
+                                      ) : null}
+                                      {canMutateResults && r.status !== "archived" ? (
+                                        <DropdownMenuItem onClick={() => handleArchive(r.id)}>
+                                          <Archive className="mr-2 h-3.5 w-3.5" />
+                                          Archive
+                                        </DropdownMenuItem>
+                                      ) : null}
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex flex-col gap-2 border-t border-[hsl(var(--st-border))] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm st-muted">
+                      Showing {rangeStart} – {rangeEnd} of {filteredResults.length} results
+                    </p>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 rounded-full"
+                        disabled={safePage <= 1}
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                        aria-label="Previous page"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </Button>
+                      <span className="flex h-8 min-w-8 items-center justify-center rounded-full bg-[hsl(var(--st-green))] px-2 text-sm font-semibold text-white">
+                        {safePage}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 rounded-full"
+                        disabled={safePage >= totalPages}
+                        onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                        aria-label="Next page"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </section>
+          </>
+        )}
       </div>
+
+      {canUpload ? (
+        <UploadResultDialog
+          open={uploadOpen}
+          onOpenChange={setUploadOpen}
+          patient={{
+            id: patientId,
+            patientHisId: patient.patientHisId,
+            name: fullName,
+          }}
+          onUploaded={() => void refetchResults()}
+        />
+      ) : null}
+
+      <StaffResultPreviewDialog
+        open={!!preview}
+        onOpenChange={(open) => {
+          if (!open) setPreview(null);
+        }}
+        result={preview}
+      />
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="staff-shell sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit Patient Information</DialogTitle>
+            <DialogDescription>Update hospital patient contact and identity fields.</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSaveInfo} className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <Label>HIS ID</Label>
+                <Input value={patient.patientHisId} readOnly className="bg-[hsl(var(--st-cream))] font-mono" />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-lastName">Last name</Label>
+                <Input
+                  id="edit-lastName"
+                  value={form.lastName}
+                  onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-firstName">First name</Label>
+                <Input
+                  id="edit-firstName"
+                  value={form.firstName}
+                  onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-middleName">Middle name</Label>
+                <Input
+                  id="edit-middleName"
+                  value={form.middleName}
+                  onChange={(e) => setForm((f) => ({ ...f, middleName: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-dob">Date of Birth</Label>
+                <Input
+                  id="edit-dob"
+                  type="date"
+                  value={form.dateOfBirth}
+                  onChange={(e) => setForm((f) => ({ ...f, dateOfBirth: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-mobile">Mobile</Label>
+                <Input
+                  id="edit-mobile"
+                  value={form.mobileNumber}
+                  onChange={(e) => setForm((f) => ({ ...f, mobileNumber: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1 sm:col-span-2">
+                <Label htmlFor="edit-email">Email</Label>
+                <Input
+                  id="edit-email"
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setEditOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={updatePatient.isPending} className="bg-[hsl(var(--st-green))]">
+                {updatePatient.isPending ? "Saving…" : "Save changes"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={viewCodeOpen} onOpenChange={setViewCodeOpen}>
+        <DialogContent className="staff-shell sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Access Code</DialogTitle>
+            <DialogDescription>
+              This is a diagnostic results access code, not a Patient Portal password.
+            </DialogDescription>
+          </DialogHeader>
+          {visibleCode ? (
+            <div className="space-y-3 text-center">
+              <p className="font-mono text-2xl font-bold tracking-widest text-[hsl(var(--st-text))]">{visibleCode}</p>
+              <Button type="button" variant="outline" onClick={() => void copyCode(visibleCode)}>
+                {copied ? <Check className="mr-2 h-4 w-4" /> : <Copy className="mr-2 h-4 w-4" />}
+                {copied ? "Copied" : "Copy Access Code"}
+              </Button>
+              {copyError ? <p className="text-sm text-red-700">{copyError}</p> : null}
+            </div>
+          ) : (
+            <p className="text-sm st-muted">No plaintext access code is available to display.</p>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={regenOpen} onOpenChange={setRegenOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Regenerate access code?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Regenerating the access code will invalidate the patient&apos;s previous access code. The new code will
+              be shown once — save it immediately.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleRegenerate} disabled={regenerate.isPending}>
+              {regenerate.isPending ? "Regenerating…" : "Regenerate"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </StaffLayout>
   );
 }

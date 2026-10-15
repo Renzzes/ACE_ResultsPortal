@@ -138,6 +138,263 @@
   --destructive-border: hsl(var(--destructive));
 }
 
+.doctor-shell {
+  --doc-bg: 150 33% 97%;
+  --doc-sidebar: 0 0% 100%;
+  --doc-card: 0 0% 100%;
+  --doc-elevated: 140 24% 94%;
+  --doc-text: 222 47% 11%;
+  --doc-heading: 175 70% 15%;
+  --doc-muted: 215 16% 47%;
+  --doc-border: 152 22% 88%;
+  --doc-green: 146 68% 35%;
+  --doc-green-bright: 146 72% 40%;
+  --doc-green-soft: 146 55% 94%;
+  --doc-maroon: 350 55% 48%;
+  --doc-maroon-soft: 350 70% 95%;
+  --doc-blue-soft: 220 100% 96%;
+  --doc-blue: 220 70% 48%;
+  --doc-kpi-1: 146 68% 35%;
+  --doc-kpi-2: 146 68% 35%;
+  --doc-kpi-3: 350 55% 48%;
+  --doc-kpi-4: 220 70% 48%;
+  --doc-shadow: 0 4px 16px rgb(15 40 30 / 0.05);
+  color: hsl(var(--doc-text));
+  background: hsl(var(--doc-bg));
+}
+
+.doctor-shell .doc-card {
+  background: hsl(var(--doc-card));
+  border: 1px solid hsl(var(--doc-border));
+  box-shadow: var(--doc-shadow);
+}
+
+.doctor-shell .doc-muted {
+  color: hsl(var(--doc-muted));
+}
+
+.doctor-shell .doc-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--doc-border)) transparent;
+}
+
+.doctor-shell .doc-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.doctor-shell .doc-scroll::-webkit-scrollbar-thumb {
+  background: hsl(var(--doc-border));
+  border-radius: 999px;
+}
+
+.staff-shell {
+  --st-bg: 40 28% 97%;
+  --st-rail: 152 34% 13%;
+  --st-rail-mid: 152 26% 18%;
+  --st-cream: 42 45% 96%;
+  --st-card: 0 0% 100%;
+  --st-text: 152 24% 11%;
+  --st-muted: 150 10% 38%;
+  --st-border: 40 18% 88%;
+  --st-green: 142 48% 34%;
+  --st-green-soft: 142 42% 90%;
+  --st-maroon: 350 48% 36%;
+  --st-maroon-soft: 350 48% 93%;
+  --st-gold: 38 55% 44%;
+  --st-shadow: 0 10px 28px rgb(20 40 28 / 0.08);
+  color: hsl(var(--st-text));
+  background: hsl(var(--st-bg));
+}
+
+.staff-shell .st-card {
+  background: hsl(var(--st-card));
+  border: 1px solid hsl(var(--st-border));
+  box-shadow: var(--st-shadow);
+}
+
+.staff-shell .st-muted {
+  color: hsl(var(--st-muted));
+}
+
+.staff-shell .st-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--st-muted) / 0.35) transparent;
+}
+
+.staff-shell .st-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.staff-shell .st-scroll::-webkit-scrollbar-thumb {
+  background: hsl(var(--st-muted) / 0.35);
+  border-radius: 999px;
+}
+
+.staff-shell .st-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Thin horizontal scrollbars (appointment tabs, etc.) — avoid chunky OS scrollbars */
+.staff-shell .st-scroll-x {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--st-muted) / 0.4) transparent;
+}
+
+.staff-shell .st-scroll-x::-webkit-scrollbar {
+  height: 4px;
+}
+
+.staff-shell .st-scroll-x::-webkit-scrollbar-thumb {
+  background: hsl(var(--st-muted) / 0.4);
+  border-radius: 999px;
+}
+
+.staff-shell .st-scroll-x::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.staff-shell .st-scroll-x::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+@keyframes st-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.staff-shell .st-chart-in {
+  animation: st-card-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.staff-shell .st-chart-in-1 { animation-delay: 60ms; }
+.staff-shell .st-chart-in-2 { animation-delay: 160ms; }
+.staff-shell .st-chart-in-3 { animation-delay: 260ms; }
+.staff-shell .st-chart-in-4 { animation-delay: 360ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .staff-shell .st-chart-in {
+    animation: none;
+  }
+}
+
+.admin-shell {
+  --ad-rail: #0f3d2e;
+  --ad-green: #1f6b45;
+  --ad-accent: #2f8f57;
+  --ad-mint: #eaf5ee;
+  --ad-maroon: #8b3a46;
+  --ad-danger: #b42318;
+  --ad-warn: #b7791f;
+  --ad-bg: #f7f8f5;
+  --ad-card: #ffffff;
+  --ad-text: #17251e;
+  --ad-muted: #66756c;
+  --ad-border: #e3e8e4;
+  color: var(--ad-text);
+  background: var(--ad-bg);
+}
+
+.admin-shell .ad-card {
+  background: var(--ad-card);
+  border: 1px solid var(--ad-border);
+  box-shadow: 0 8px 24px rgb(15 61 46 / 0.05);
+}
+
+.admin-shell .ad-muted {
+  color: var(--ad-muted);
+}
+
+.patient-shell {
+  --pt-bg: 140 20% 97%;
+  --pt-rail: 152 49% 16%;
+  --pt-rail-mid: 152 26% 20%;
+  --pt-card: 0 0% 100%;
+  --pt-text: 153 19% 11%;
+  --pt-muted: 150 6% 42%;
+  --pt-border: 142 13% 88%;
+  --pt-green: 141 45% 34%;
+  --pt-green-2: 140 39% 40%;
+  --pt-green-soft: 140 35% 93%;
+  --pt-maroon: 349 47% 38%;
+  --pt-maroon-soft: 345 46% 95%;
+  --pt-shadow: 0 8px 24px rgb(21 61 43 / 0.06);
+  color: hsl(var(--pt-text));
+  background: hsl(var(--pt-bg));
+}
+
+.patient-shell .pt-card {
+  background: hsl(var(--pt-card));
+  border: 1px solid hsl(var(--pt-border));
+  box-shadow: 0 4px 18px rgb(21 61 43 / 0.05);
+}
+
+.patient-shell .pt-rail {
+  background: #153d2b;
+}
+
+.patient-shell .pt-muted {
+  color: hsl(var(--pt-muted));
+}
+
+.patient-shell,
+.patient-shell *,
+.patient-shell .pt-scroll,
+.ace-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(47 125 74 / 0.4) transparent;
+}
+
+.patient-shell::-webkit-scrollbar,
+.patient-shell *::-webkit-scrollbar,
+.ace-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.patient-shell::-webkit-scrollbar-track,
+.patient-shell *::-webkit-scrollbar-track,
+.ace-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  margin-block: 6px;
+}
+
+.patient-shell::-webkit-scrollbar-thumb,
+.patient-shell *::-webkit-scrollbar-thumb,
+.ace-scroll::-webkit-scrollbar-thumb {
+  background: rgb(47 125 74 / 0.4);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.patient-shell::-webkit-scrollbar-thumb:hover,
+.patient-shell *::-webkit-scrollbar-thumb:hover,
+.ace-scroll::-webkit-scrollbar-thumb:hover {
+  background: #2f7d4a;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.patient-shell::-webkit-scrollbar-button,
+.patient-shell *::-webkit-scrollbar-button,
+.ace-scroll::-webkit-scrollbar-button,
+.patient-shell::-webkit-scrollbar-corner,
+.patient-shell *::-webkit-scrollbar-corner,
+.ace-scroll::-webkit-scrollbar-corner {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+
 @layer base {
   * {
     @apply border-border;

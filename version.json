@@ -1,0 +1,15 @@
+{
+  "name": "ACE Results Portal",
+  "application": "ACE Results Portal",
+  "version": "0.0.0",
+  "packageVersion": "0.0.0",
+  "buildDate": "2026-10-15T04:10:37.987Z",
+  "buildTime": "2026-10-15 04:10",
+  "gitCommit": "c583214",
+  "gitBranch": "main",
+  "commit": "c583214",
+  "builder": "FILESERVER",
+  "nodeVersion": "v24.19.0",
+  "deploymentPackageName": "ACERPTS-OneClick-0.0.0",
+  "deploymentMode": "production"
+}

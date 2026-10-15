@@ -8,6 +8,8 @@ export type BodyType<T> = T;
 
 export type AuthTokenGetter = () => Promise<string | null> | string | null;
 
+export type PortalAccessCodeGetter = () => Promise<string | null> | string | null;
+
 /**
  * Invoked when a request receives a 401. If it resolves to `true`, the original
  * request is retried once (with a freshly fetched auth token). Use this to
@@ -24,6 +26,7 @@ const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 
 let _baseUrl: string | null = null;
 let _authTokenGetter: AuthTokenGetter | null = null;
+let _portalAccessCodeGetter: PortalAccessCodeGetter | null = null;
 let _unauthorizedHandler: UnauthorizedHandler | null = null;
 
 /**
@@ -50,6 +53,14 @@ export function setBaseUrl(url: string | null): void {
  */
 export function setAuthTokenGetter(getter: AuthTokenGetter | null): void {
   _authTokenGetter = getter;
+}
+
+/**
+ * Register a getter that supplies the patient results access code header
+ * (`X-Portal-Access-Code`) for portal result endpoints.
+ */
+export function setPortalAccessCodeGetter(getter: PortalAccessCodeGetter | null): void {
+  _portalAccessCodeGetter = getter;
 }
 
 /**
@@ -381,7 +392,21 @@ export async function customFetch<T = unknown>(
         finalHeaders.set("authorization", `Bearer ${token}`);
       }
     }
-    return fetch(input, { ...init, method, headers: finalHeaders });
+    if (_portalAccessCodeGetter && !finalHeaders.has("x-portal-access-code")) {
+      const url = requestInfo.url;
+      if (url.includes("/portal/results")) {
+        const accessCode = await _portalAccessCodeGetter();
+        if (accessCode) {
+          finalHeaders.set("x-portal-access-code", accessCode);
+        }
+      }
+    }
+      return fetch(input, {
+      credentials: "include",
+      ...init,
+      method,
+      headers: finalHeaders,
+    });
   };
 
   let response = await performFetch();

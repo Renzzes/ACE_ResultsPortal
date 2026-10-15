@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { useListAuditLogs, getListAuditLogsQueryKey } from "@workspace/api-client-react";
+import { useAuthoritativeRole } from "@/lib/auth";
+import { mayRequestAuditOrArchive } from "@/lib/workflow-stability";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +27,7 @@ const ACTION_LABELS: Record<string, string> = {
 const ACTIONS = ["login", "logout", "upload", "edit", "delete", "view", "download", "access_denied", "access_code_regen"];
 
 export default function AuditLogsPage() {
+  const role = useAuthoritativeRole();
   const [action, setAction] = useState("");
   const [patientId, setPatientId] = useState("");
   const [dateFrom, setDateFrom] = useState("");
@@ -39,7 +42,7 @@ export default function AuditLogsPage() {
 
   const { data, isLoading } = useListAuditLogs(
     params as any,
-    { query: { queryKey: getListAuditLogsQueryKey(params as any) } }
+    { query: { queryKey: getListAuditLogsQueryKey(params as any), enabled: mayRequestAuditOrArchive(role) } }
   );
 
   const logs = data?.data ?? [];
@@ -47,12 +50,9 @@ export default function AuditLogsPage() {
   const totalPages = Math.ceil(total / 50);
 
   return (
-    <StaffLayout>
-      <div className="space-y-6">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight text-primary">Audit Logs</h2>
-          <p className="text-muted-foreground">Track all system activity and access events</p>
-        </div>
+    <StaffLayout title="Audit Logs" fill>
+      <div className="flex h-full min-h-0 flex-col gap-4">
+        <p className="st-muted text-sm">Track all system activity and access events</p>
 
         {/* Filters */}
         <div className="flex flex-wrap gap-3">
@@ -82,14 +82,14 @@ export default function AuditLogsPage() {
           )}
         </div>
 
-        <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
+        <div className="st-card flex-1 min-h-0 overflow-auto rounded-2xl">
           {isLoading ? (
             <div className="p-8 text-center text-muted-foreground">Loading audit logs...</div>
           ) : logs.length === 0 ? (
             <div className="p-12 text-center text-muted-foreground">No audit log entries found.</div>
           ) : (
             <table className="w-full text-sm">
-              <thead className="bg-muted/50 border-b border-border">
+              <thead className="sticky top-0 bg-[hsl(var(--st-cream))] border-b border-[hsl(var(--st-border))]">
                 <tr>
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">Timestamp</th>
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">Action</th>

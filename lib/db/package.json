@@ -5,21 +5,19 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./schema": "./src/schema/index.ts"
+    "./lite": "./src/lite.ts",
+    "./repos/patient-departments": "./src/repos/patient-departments.ts",
+    "./repos/departments": "./src/repos/departments.ts"
   },
   "scripts": {
-    "push": "drizzle-kit push --config ./drizzle.config.ts",
-    "push-force": "drizzle-kit push --force --config ./drizzle.config.ts"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "drizzle-orm": "catalog:",
-    "drizzle-zod": "^0.8.3",
-    "pg": "^8.20.0",
-    "zod": "catalog:"
+    "dotenv": "^16.6.1",
+    "mssql": "^11.0.1"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
-    "@types/pg": "^8.20.0",
-    "drizzle-kit": "^0.31.10"
+    "@types/mssql": "^9.1.8",
+    "@types/node": "catalog:"
   }
 }

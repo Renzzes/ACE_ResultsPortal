@@ -3,10 +3,28 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: ACE Results Portal API specification
+  description: |
+    ACE Results Portal HTTP contract. This document describes the **implemented** API.
+    Middleware is authoritative for authentication and RBAC; this spec is documentation.
+
+    **Staff access JWT** (`Authorization: Bearer`, claim `type=access`, 15 minutes).
+    New access tokens also carry `sid`, the public session id. `sid` is not a role.
+    **Refresh secret** for a new session is an opaque value stored only as a hash.
+    It is set as HttpOnly cookie `ace_rt_<sid>` (`path=/api/auth`, SameSite=Lax, Secure in production).
+    `POST /auth/session/{sessionPublicId}/refresh` rotates that secret and keeps the same `sid`.
+    `POST /auth/session/{sessionPublicId}/logout` revokes only that session.
+    The refresh secret is never returned in JSON. Cookie `ace_refresh_token` is not issued.
+    **Portal JWT** (`type=portal`, 4 hours) is issued by `POST /portal/login` and, for new logins, includes `sid`.
+    **Download JWT** (`type=download`, 5 minutes) is a path token, not a filesystem path.
+
+    Staff roles: `super_admin`, `medical_records`, `laboratory`, `radiology`, `physician`.
+    Unhandled failures return HTTP 500 `{ "error": "Internal server error" }`.
+    JSON errors use `{ "error": string }`. Oversized uploads return **400**, not 413.
 servers:
   - url: /api
     description: Base API path
+security:
+  - staffBearer: []
 tags:
   - name: health
     description: Health operations
@@ -26,18 +44,33 @@ tags:
     description: Audit log management
   - name: dashboard
     description: Dashboard and reporting
+  - name: admin
+    description: Administrator overview (super_admin)
   - name: archive
     description: Records archiving
+  - name: notifications
+    description: Per-user in-app notifications
+  - name: announcements
+    description: Admin announcements and audience targeting
+  - name: messages
+    description: Thread-based staff/physician messaging
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
+      description: Returns server health status. No authentication.
+      security: []
       responses:
         "200":
           description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+        "503":
+          description: Database unreachable
           content:
             application/json:
               schema:
@@ -49,6 +82,17 @@ paths:
       operationId: login
       tags: [auth]
       summary: Staff/physician login
+      description: |
+        Public. Rate limited (20 / 15 minutes → 429).
+        Requires `portal` channel: `admin`, `staff`, `doctor`, or `patient`.
+        The channel is session metadata and does not change the user's role.
+        Creates one `auth_sessions` row with `public_id` and `portal`.
+        Sets HttpOnly cookie `ace_rt_<sessionPublicId>` (path=/api/auth, SameSite=Lax, 7 days, Secure in production).
+        Does not set cookie `ace_refresh_token`. If that cookie is presented, the response expires it.
+        Access token is JSON (15m) and includes `sid` = `sessionPublicId`.
+        The response does not include a refresh secret.
+        Does not return password hashes.
+      security: []
       requestBody:
         required: true
         content:
@@ -58,56 +102,109 @@ paths:
       responses:
         "200":
           description: Login successful
+          headers:
+            Set-Cookie:
+              description: HttpOnly `ace_rt_<sessionPublicId>` (path=/api/auth, SameSite=Lax, 7 days).
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthResponse"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Invalid credentials
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Account locked
+          description: Account locked after failed attempts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
 
-  /auth/logout:
+  /auth/session/{sessionPublicId}/refresh:
     post:
-      operationId: logout
+      operationId: refreshAuthSession
       tags: [auth]
-      summary: Logout current session
+      summary: Refresh one portal session
+      description: |
+        Public. Rate limited (20 / 15 minutes → 429).
+        Reads the refresh secret from HttpOnly cookie `ace_rt_<sessionPublicId>` only.
+        Rejects a missing, revoked, expired, or portal-less session, and a secret that does not match the stored hash.
+        Rotates the refresh secret, keeps the same `public_id`, and returns a new access token whose `sid` is that id.
+        Does not return the refresh secret. Does not create another auth_sessions row.
+        SameSite=Lax and POST (no GET) are the CSRF controls. Secure is set in production only.
+      security: []
+      parameters:
+        - name: sessionPublicId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 22
+            maxLength: 22
+          description: Public session handle. Not a secret.
       responses:
         "200":
-          description: Logged out
+          description: New access token for the same session
+          headers:
+            Set-Cookie:
+              description: Replacement HttpOnly `ace_rt_<sessionPublicId>`. The previous secret no longer matches.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionRefreshResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /auth/session/{sessionPublicId}/logout:
+    post:
+      operationId: logoutAuthSession
+      tags: [auth]
+      summary: Revoke one portal session
+      description: |
+        Requires the caller's staff access JWT or patient portal JWT.
+        Revokes only the session whose `public_id` is `sessionPublicId` when that row belongs to the caller.
+        Does not revoke other sessions for the same user.
+        Clears only cookie `ace_rt_<sessionPublicId>`.
+        Missing sessions and sessions owned by someone else both return 401.
+        POST only. SameSite=Lax. No GET logout.
+      security:
+        - staffBearer: []
+        - portalBearer: []
+      parameters:
+        - name: sessionPublicId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 22
+            maxLength: 22
+          description: Public session handle. Not a secret.
+      responses:
+        "200":
+          description: That session was revoked
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
-
-  /auth/refresh:
-    post:
-      operationId: refreshToken
-      tags: [auth]
-      summary: Refresh access token
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RefreshTokenInput"
-      responses:
-        "200":
-          description: New access token
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AuthResponse"
         "401":
-          description: Invalid refresh token
+          $ref: "#/components/responses/Unauthorized"
 
   /auth/me:
     get:
       operationId: getCurrentUser
       tags: [auth]
       summary: Get current authenticated user
+      description: Requires staff access JWT. Any authenticated staff role.
+      security:
+        - staffBearer: []
       responses:
         "200":
           description: Current user info
@@ -116,13 +213,16 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
 
   /auth/change-password:
     post:
       operationId: changePassword
       tags: [auth]
       summary: Change current user password
+      description: Requires staff access JWT. Any authenticated staff role.
+      security:
+        - staffBearer: []
       requestBody:
         required: true
         content:
@@ -137,9 +237,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
 
   # Users (staff/admin management)
   /users:
@@ -147,6 +247,9 @@ paths:
       operationId: listUsers
       tags: [users]
       summary: List all staff users
+      description: Requires staff access JWT. Role `super_admin` only.
+      security:
+        - staffBearer: []
       parameters:
         - name: role
           in: query
@@ -177,14 +280,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Forbidden
+          $ref: "#/components/responses/Forbidden"
     post:
       operationId: createUser
       tags: [users]
       summary: Create a new staff user
+      description: Requires staff access JWT. Role `super_admin` only. Does not return the password.
       requestBody:
         required: true
         content:
@@ -199,19 +305,20 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Forbidden
+          $ref: "#/components/responses/Forbidden"
         "409":
-          description: Username already exists
+          $ref: "#/components/responses/Conflict"
 
   /users/{id}:
     get:
       operationId: getUser
       tags: [users]
       summary: Get a staff user by ID
+      description: Requires staff access JWT. Role `super_admin` only.
       parameters:
         - name: id
           in: path
@@ -225,12 +332,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
     patch:
       operationId: updateUser
       tags: [users]
       summary: Update a staff user
+      description: Requires staff access JWT. Role `super_admin` only.
       parameters:
         - name: id
           in: path
@@ -251,13 +365,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
     delete:
       operationId: deleteUser
       tags: [users]
-      summary: Deactivate/delete a staff user
+      summary: Deactivate a staff user
+      description: Requires staff access JWT. Role `super_admin` only. Sets `isActive=false`; does not hard-delete.
       parameters:
         - name: id
           in: path
@@ -271,14 +390,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
 
   /users/{id}/reset-password:
     post:
       operationId: resetUserPassword
       tags: [users]
       summary: Admin reset of user password
+      description: Requires staff access JWT. Role `super_admin` only. Does not return the new password.
       parameters:
         - name: id
           in: path
@@ -298,8 +422,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
 
   # Patients
   /patients:
@@ -307,6 +437,9 @@ paths:
       operationId: listPatients
       tags: [patients]
       summary: List patient records
+      description: |
+        Requires staff access JWT. Physicians only see assigned patients.
+        Other staff roles see all patients.
       parameters:
         - name: search
           in: query
@@ -330,11 +463,14 @@ paths:
               schema:
                 $ref: "#/components/schemas/PatientListResponse"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createPatient
       tags: [patients]
       summary: Create a new patient record
+      description: |
+        Requires staff access JWT. Roles `super_admin`, `medical_records`, `laboratory`, `radiology`.
+        Response includes plaintext `accessCode` once; it is stored hashed.
       requestBody:
         required: true
         content:
@@ -349,15 +485,20 @@ paths:
               schema:
                 $ref: "#/components/schemas/Patient"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
-          description: Patient ID already exists
+          $ref: "#/components/responses/Conflict"
 
   /patients/{id}:
     get:
       operationId: getPatient
       tags: [patients]
       summary: Get patient record by internal ID
+      description: Requires staff access JWT. Physicians must be assigned to the patient.
       parameters:
         - name: id
           in: path
@@ -371,12 +512,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Patient"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
     patch:
       operationId: updatePatient
       tags: [patients]
       summary: Update patient record
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
       parameters:
         - name: id
           in: path
@@ -397,13 +543,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/Patient"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
     delete:
       operationId: deletePatient
       tags: [patients]
       summary: Delete patient record
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
       parameters:
         - name: id
           in: path
@@ -417,14 +568,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
 
   /patients/{id}/regenerate-access-code:
     post:
       operationId: regenerateAccessCode
       tags: [patients]
       summary: Regenerate patient access code
+      description: |
+        Requires staff access JWT. Roles `super_admin`, `medical_records`, `laboratory`, `radiology`.
+        Response includes plaintext `accessCode` once.
       parameters:
         - name: id
           in: path
@@ -438,14 +596,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Patient"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
 
   /patients/{id}/results:
     get:
       operationId: listPatientResultsStaff
       tags: [patients]
       summary: Get all results for a patient (staff view)
+      description: |
+        Requires staff access JWT. Physicians must be assigned and receive only `released` results.
+        Laboratory/radiology are scoped by category.
       parameters:
         - name: id
           in: path
@@ -461,8 +626,130 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Result"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
+
+  /physicians:
+    get:
+      operationId: listPhysicians
+      tags: [users]
+      summary: List active physicians for assignment
+      description: Requires staff access JWT. Any authenticated staff role.
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Physicians
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PhysicianSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /patients/{id}/physicians:
+    get:
+      operationId: listPatientPhysicians
+      tags: [patients]
+      summary: List physicians assigned to a patient
+      description: Requires staff access JWT. Physicians must be assigned to the patient.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Assigned physicians
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AssignedPhysician"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: assignPatientPhysician
+      tags: [patients]
+      summary: Assign a physician to a patient
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignPhysicianInput"
+      responses:
+        "201":
+          description: Assigned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /patients/{id}/physicians/{physicianId}:
+    delete:
+      operationId: unassignPatientPhysician
+      tags: [patients]
+      summary: Remove a physician assignment
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: physicianId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   # Results
   /results:
@@ -470,6 +757,9 @@ paths:
       operationId: listResults
       tags: [results]
       summary: List all results
+      description: |
+        Requires staff access JWT. Physicians see assigned patients' `released` results only.
+        Laboratory/radiology are scoped by category.
       parameters:
         - name: patientId
           in: query
@@ -478,11 +768,11 @@ paths:
         - name: category
           in: query
           schema:
-            type: string
+            $ref: "#/components/schemas/ResultCategory"
         - name: status
           in: query
           schema:
-            type: string
+            $ref: "#/components/schemas/ResultStatus"
         - name: uploadedBy
           in: query
           schema:
@@ -493,6 +783,11 @@ paths:
             type: string
         - name: dateTo
           in: query
+          schema:
+            type: string
+        - name: search
+          in: query
+          description: Filter by patient first name, last name, or HIS ID
           schema:
             type: string
         - name: page
@@ -513,19 +808,29 @@ paths:
               schema:
                 $ref: "#/components/schemas/ResultListResponse"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
 
   /results/upload:
     post:
       operationId: uploadResult
       tags: [results]
       summary: Upload a diagnostic result file
+      description: |
+        Requires staff access JWT. Roles `super_admin`, `medical_records`, `laboratory`, `radiology`.
+        Laboratory may upload `laboratory` only. Radiology may upload imaging categories.
+        Multipart field `file` is required. Stored path is application-generated; clients never send filesystem paths.
+        Supported types PDF/JPEG/PNG. Maximum size 50 MiB (`RESULT_MAX_FILE_BYTES`). Oversize → 400, not 413.
+      security:
+        - staffBearer: []
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               $ref: "#/components/schemas/ResultUploadInput"
+            encoding:
+              file:
+                contentType: application/pdf, image/jpeg, image/png
       responses:
         "201":
           description: Result uploaded
@@ -534,15 +839,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/Result"
         "400":
-          description: Bad request (invalid file type or size)
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /results/{id}:
     get:
       operationId: getResult
       tags: [results]
       summary: Get result details
+      description: Requires staff access JWT. Same authorization as download (RBAC + assignment + release rules).
       parameters:
         - name: id
           in: path
@@ -556,12 +864,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Result"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
     patch:
       operationId: updateResult
       tags: [results]
       summary: Update result metadata
+      description: |
+        Requires staff access JWT. Roles `super_admin`, `medical_records`, `laboratory`, `radiology`
+        within department scope. Status `archived` is a database status change only; files are not moved.
       parameters:
         - name: id
           in: path
@@ -582,13 +897,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/Result"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
     delete:
       operationId: deleteResult
       tags: [results]
       summary: Delete a result
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`. Deletes metadata and the stored file.
       parameters:
         - name: id
           in: path
@@ -602,14 +922,107 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
+
+  /results/{id}/assignment:
+    put:
+      operationId: putResultAssignment
+      tags: [results]
+      summary: Assign or clear physician copy for a result
+      description: |
+        Requires staff upload permission within category scope.
+        Creates a private read-only result copy for continuity of care.
+        Does not change patient visibility or result release status.
+        Does not implement physician approval or rejection.
+        Server validates physicianId is an active user with role physician.
+        Reassignment revokes prior physician access immediately.
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResultAssignmentInput"
+      responses:
+        "200":
+          description: Assignment updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Assignment schema not installed
+
+  /results/{id}/review:
+    put:
+      operationId: putResultReview
+      tags: [results]
+      summary: Save the authenticated physician's review of one result
+      description: |
+        Requires a physician access JWT. The reviewer is the authenticated user.
+        `physicianId` and `reviewedAt` in the body are not accepted as the review identity or timestamp.
+        Optional comment. Whitespace-only comments are stored as null. Comments longer than 4000 characters are rejected.
+        A repeat review by the same physician updates that physician's row and sets `reviewedAt` to the latest server time.
+        Other physicians' reviews are unchanged. This does not change result status, remarks, release, archive, or assignments.
+        Returns 503 when `dbo.result_reviews` is not installed. Run `docs/migration/sql/014_result_reviews.sql` against ACE_ResultsPortal.
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResultReviewInput"
+      responses:
+        "200":
+          description: Persisted review for the authenticated physician
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResultReview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Physician review storage is not installed. Run docs/migration/sql/014_result_reviews.sql against ACE_ResultsPortal.
 
   /results/{id}/release:
     post:
       operationId: releaseResult
       tags: [results]
       summary: Release a result to patient
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`, `laboratory`, `radiology` within department scope.
       parameters:
         - name: id
           in: path
@@ -629,14 +1042,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Result"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
 
   /results/{id}/download:
     get:
       operationId: getResultDownloadUrl
       tags: [results]
-      summary: Get signed download URL for a result (staff/physician)
+      summary: Get signed download URL for a result (staff)
+      description: |
+        Requires staff access JWT. Authorization is re-checked. Returns a relative `/api/results/file/{token}` URL
+        (5 minutes). Does not return filesystem paths.
       parameters:
         - name: id
           in: path
@@ -650,40 +1072,716 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DownloadUrlResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
+
+  /results/file/{token}:
+    get:
+      operationId: downloadResultFile
+      tags: [results]
+      summary: Stream a result file using a short-lived download token
+      description: |
+        No Bearer header. Token is a download JWT (`type=download`, `forType=staff`, 5 minutes).
+        Server re-authenticates the subject and re-authorizes the result before streaming.
+        Does not expose storage-root directories or OS paths.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File bytes (PDF, JPEG, or PNG)
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   # Patient Portal
-  /portal/verify:
+  /portal/verify-identity:
     post:
-      operationId: verifyPatientAccess
+      operationId: verifyPortalPatientIdentity
       tags: [patient-portal]
-      summary: Verify patient identity to access results
+      summary: Verify hospital patient identity for portal registration
+      description: |
+        Public. Rate limited (10 / 15 minutes → 429). Step 1 of registration: verifies Hospital Patient ID + last name + date of birth
+        against LiveDB_ACE (read-only). Returns a short-lived registration token when no portal account exists.
+        Does not create an account or issue an access code. Failed verification returns 401. HIS outage returns 503.
+      security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PatientAccessVerification"
+              $ref: "#/components/schemas/PortalIdentityVerification"
       responses:
         "200":
-          description: Access granted
+          description: Identity verified
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/PatientPortalSession"
+                $ref: "#/components/schemas/PortalIdentityVerificationResult"
         "400":
-          description: Bad request
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Access denied (wrong credentials)
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          description: HIS verification temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /portal/register:
+    post:
+      operationId: registerPortalPatient
+      tags: [patient-portal]
+      summary: Create patient portal account after HIS verification
+      description: |
+        Public. Rate limited (10 / 15 minutes → 429). Step 2 of registration: requires a valid registration token
+        from verify-identity plus patient-supplied email and password. Creates dbo.patients with HIS demographics and returns a
+        one-time access code for viewing results. Email is stored for portal recovery only (not from LiveDB_ACE).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PortalAccountRegistration"
+      responses:
+        "200":
+          description: Portal account created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalAccountRegistrationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Account or email conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          description: Service temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /portal/recover/request:
+    post:
+      operationId: requestPortalAccessCodeRecovery
+      tags: [patient-portal]
+      summary: Start forgot password recovery
+      description: |
+        Public. Rate limited (10 / 15 minutes → 429). Verifies hospital identity, then sends a 6-digit OTP to the
+        patient's registered portal email when SMTP is configured. Does not reveal whether a portal account exists.
+        Accounts without a portal email receive an assisted-recovery response.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PortalIdentityVerification"
+      responses:
+        "200":
+          description: Recovery initiated or generic acknowledgment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalRecoveryRequestResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          description: HIS or email delivery unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /portal/recover/verify:
+    post:
+      operationId: verifyPortalRecoveryOtp
+      tags: [patient-portal]
+      summary: Verify the password-recovery email code
+      description: |
+        Public. Rate limited (10 / 15 minutes → 429). Checks the 6-digit code for an active recovery token
+        and marks that recovery transaction as OTP-verified. Does not change the password and does not return the code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recoveryToken, otp]
+              properties:
+                recoveryToken: { type: string }
+                otp: { type: string, pattern: "^\\d{6}$" }
+      responses:
+        "200":
+          description: OTP accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [verified]
+                properties:
+                  verified: { type: boolean, enum: [true] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /portal/recover/confirm:
+    post:
+      operationId: confirmPortalAccessCodeRecovery
+      tags: [patient-portal]
+      summary: Confirm password recovery OTP and set new password
+      description: |
+        Public. Rate limited (10 / 15 minutes → 429). Requires a recovery token whose OTP was already verified, then sets a new portal login password,
+        then emails confirmation only after the password is updated. Recovery credentials are single-use.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PortalRecoveryConfirm"
+      responses:
+        "200":
+          description: Password reset complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          description: Email delivery unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /portal/verify:
+    post:
+      operationId: verifyPatientAccess
+      tags: [patient-portal]
+      summary: Unlock patient results with access code
+      description: |
+        Requires portal JWT. Rate limited (20 / 15 minutes → 429).
+        Validates the patient access code for viewing/downloading diagnostic results.
+        Portal sign-in uses `POST /portal/login` with Hospital Patient ID and password instead.
+      security:
+        - portalBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accessCode]
+              properties:
+                accessCode: { type: string, maxLength: 32 }
+      responses:
+        "200":
+          description: Results access granted for this session
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unlocked]
+                properties:
+                  unlocked: { type: boolean, enum: [true] }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Too many failed attempts
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /portal/notifications:
+    get:
+      operationId: listPortalNotifications
+      tags: [patient-portal]
+      summary: List notifications for the authenticated Patient Portal user
+      description: |
+        Requires portal JWT. Recipient is resolved server-side:
+        JWT.patientId → patients.id → patients.portal_user_id → users.id.
+        Never accepts recipient_user_id from the client.
+      security:
+        - portalBearer: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: unreadOnly
+          in: query
+          schema: { type: string, enum: ["0", "1", "true", "false"] }
+      responses:
+        "200":
+          description: Paginated notifications for the current portal user only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/BadRequest"
+
+  /portal/notifications/unread-count:
+    get:
+      operationId: getPortalNotificationUnreadCount
+      tags: [patient-portal]
+      summary: Unread notification count for the authenticated Patient Portal user
+      security:
+        - portalBearer: []
+      responses:
+        "200":
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /portal/notifications/{id}/read:
+    post:
+      operationId: markPortalNotificationRead
+      tags: [patient-portal]
+      summary: Mark one of the current portal user's notifications as read
+      security:
+        - portalBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated notification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalNotification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /portal/notifications/read-all:
+    post:
+      operationId: markAllPortalNotificationsRead
+      tags: [patient-portal]
+      summary: Mark all of the current portal user's notifications as read
+      security:
+        - portalBearer: []
+      responses:
+        "200":
+          description: Number of rows updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated]
+                properties:
+                  updated: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /portal/messages/recipients:
+    get:
+      operationId: listPortalMessageRecipients
+      tags: [patient-portal]
+      summary: List recipients the authenticated patient may message
+      description: |
+        Requires portal JWT. Returns only assigned physicians and authorized
+        Medical Records / Admin support users. Recipient IDs are server-authorized.
+        `search` must be at least 2 characters; shorter queries return an empty list.
+        The search filters the authorized set and does not expose other accounts.
+      security:
+        - portalBearer: []
+      parameters:
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Authorized recipients
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, role, category]
+                      properties:
+                        id: { type: integer }
+                        name: { type: string }
+                        role: { type: string }
+                        category: { type: string, enum: [doctor, staff, admin] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /portal/messages/unread-count:
+    get:
+      operationId: getPortalMessageUnreadCount
+      tags: [patient-portal]
+      summary: Unread message thread count for the authenticated patient
+      security:
+        - portalBearer: []
+      responses:
+        "200":
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /portal/messages:
+    get:
+      operationId: listPortalMessageThreads
+      tags: [patient-portal]
+      summary: List message threads for the authenticated patient
+      security:
+        - portalBearer: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        "200":
+          description: Patient-owned threads only
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /portal/messages/threads:
+    post:
+      operationId: createPortalMessageThread
+      tags: [patient-portal]
+      summary: Open or create a patient 1-to-1 thread with an authorized recipient
+      description: |
+        patient_id and sender_user_id are derived server-side from the portal JWT.
+        Client-supplied patientId / senderUserId / participants are ignored.
+        Subject and body are optional. Selecting a recipient opens the existing open
+        1-to-1 thread for that pair, or creates one. A message is stored only when body is sent.
+      security:
+        - portalBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recipientUserId]
+              properties:
+                subject: { type: string, maxLength: 255 }
+                body: { type: string, maxLength: 4000 }
+                recipientUserId: { type: integer }
+      responses:
+        "200":
+          description: Existing open 1-to-1 thread reused
+        "201":
+          description: Thread created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /portal/messages/{threadId}:
+    get:
+      operationId: getPortalMessageThread
+      tags: [patient-portal]
+      summary: Get a patient-owned message thread
+      security:
+        - portalBearer: []
+      parameters:
+        - name: threadId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Thread detail
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deletePortalMessageThread
+      tags: [patient-portal]
+      summary: Permanently delete a patient-owned message thread
+      security:
+        - portalBearer: []
+      parameters:
+        - name: threadId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Thread deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /portal/messages/{threadId}/messages:
+    post:
+      operationId: sendPortalMessage
+      tags: [patient-portal]
+      summary: Send a message in a patient-owned thread
+      security:
+        - portalBearer: []
+      parameters:
+        - name: threadId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 4000 }
+      responses:
+        "201":
+          description: Message created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /portal/messages/{threadId}/read:
+    post:
+      operationId: markPortalMessageThreadRead
+      tags: [patient-portal]
+      summary: Mark the authenticated patient's participant row as read
+      security:
+        - portalBearer: []
+      parameters:
+        - name: threadId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Marked read
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /portal/messages/{threadId}/close:
+    post:
+      operationId: closePortalMessageThread
+      tags: [patient-portal]
+      summary: Close a patient-owned message thread
+      security:
+        - portalBearer: []
+      parameters:
+        - name: threadId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Thread closed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /portal/profile:
+    get:
+      operationId: getPortalProfile
+      tags: [patient-portal]
+      summary: Get authenticated patient profile
+      description: |
+        Requires portal JWT. Patient identity is derived from JWT.patientId only.
+        Requires an activated portal account (portal_user_id → users.role=patient, is_active=1).
+        HIS demographics are included as read-only fields. Does not expose hashes or portal_user_id.
+      security:
+        - portalBearer: []
+      responses:
+        "200":
+          description: Patient profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: patchPortalProfile
+      tags: [patient-portal]
+      summary: Update authenticated patient contact information
+      description: |
+        Requires portal JWT. Updates only email and/or mobileNumber for the authenticated patient.
+        Client-supplied patientId and HIS identity fields are ignored and never written.
+        Email uniqueness is enforced application-side. Does not write to LiveDB_ACE.
+      security:
+        - portalBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PortalProfileUpdate"
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Email unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /portal/overview:
+    get:
+      operationId: getPortalOverview
+      tags: [patient-portal]
+      summary: Get authenticated patient profile, assigned physicians, and appointments
+      description: |
+        Requires portal JWT. Patient identity is derived from the portal session.
+        Returns only the authenticated patient's demographics, assigned physicians, and
+        read-only ShanScheduler appointments (today + next). Appointment patient mapping
+        uses patients.patient_his_id against a configured ShanScheduler column.
+        Does not invent clinical demographics (gender, blood type, address, etc.).
+      security:
+        - portalBearer: []
+      responses:
+        "200":
+          description: Patient overview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /portal/care-history:
+    get:
+      operationId: getPortalCareHistory
+      tags: [patient-portal]
+      summary: Get unified care history for the authenticated patient
+      description: |
+        Requires portal JWT. Identity is derived exclusively from the portal session
+        (`JWT.patientId`). Client-supplied `patientId` is ignored.
+
+        Assembles a bounded timeline from:
+        - ShanScheduler appointments (read-only; PatientHisId join only)
+        - ACE_ResultsPortal released results the patient can already access
+        - ACE_ResultsPortal prescriptions owned by the patient
+
+        Source failures are isolated: scheduler unavailability does not clear
+        results/prescriptions. Deep links are pointers only and must be re-authorized
+        by destination endpoints. Does not write to ShanScheduler or LiveDB_ACE.
+      security:
+        - portalBearer: []
+      responses:
+        "200":
+          description: Care history events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalCareHistory"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /portal/results:
     get:
       operationId: getPortalResults
       tags: [patient-portal]
       summary: Get released results for authenticated patient
+      description: Requires portal JWT. Own patient, `released` results only.
+      security:
+        - portalBearer: []
       responses:
         "200":
           description: Patient released results
@@ -694,13 +1792,73 @@ paths:
                 items:
                   $ref: "#/components/schemas/PortalResult"
         "401":
-          description: Not authenticated
+          $ref: "#/components/responses/Unauthorized"
+
+  /portal/medications:
+    get:
+      operationId: listPortalMedications
+      tags: [patient-portal]
+      summary: List prescriptions for authenticated patient
+      description: |
+        Requires portal JWT and active portal account.
+        Identity is JWT patientId only; client patientId query/body is ignored.
+      security:
+        - portalBearer: []
+      responses:
+        "200":
+          description: Patient prescriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Prescription"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Prescriptions schema not installed
+
+  /portal/medications/{id}:
+    get:
+      operationId: getPortalMedication
+      tags: [patient-portal]
+      summary: Get one prescription for authenticated patient
+      description: |
+        Requires portal JWT. Returns 404 for missing or foreign prescriptions.
+      security:
+        - portalBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Prescription
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Prescription"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Prescriptions schema not installed
 
   /portal/results/{id}/download:
     get:
       operationId: getPortalResultDownloadUrl
       tags: [patient-portal]
       summary: Get signed download URL for patient (portal)
+      description: Requires portal JWT. Own patient and `released` only. Returns `/api/portal/file/{token}`.
+      security:
+        - portalBearer: []
       parameters:
         - name: id
           in: path
@@ -715,17 +1873,59 @@ paths:
               schema:
                 $ref: "#/components/schemas/DownloadUrlResponse"
         "401":
-          description: Not authenticated
-        "403":
-          description: Not authorized to access this result
+          $ref: "#/components/responses/Unauthorized"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
+
+  /portal/file/{token}:
+    get:
+      operationId: downloadPortalResultFile
+      tags: [patient-portal]
+      summary: Stream a released result file for the authenticated patient
+      description: |
+        No Bearer header. Download JWT `forType=portal`. Re-checks own patient + `released`.
+        Does not expose storage paths.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File bytes
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /portal/logout:
     post:
       operationId: patientPortalLogout
       tags: [patient-portal]
       summary: Patient portal logout
+      description: |
+        Requires a portal JWT that includes `sid`.
+        Revokes only that session and clears `ace_rt_<sid>`.
+        Does not revoke other sessions. A portal token without `sid` is rejected with 401.
+      security:
+        - portalBearer: []
       responses:
         "200":
           description: Logged out
@@ -733,6 +1933,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   # Physician Portal
   /physician/search:
@@ -740,6 +1942,12 @@ paths:
       operationId: physicianSearchPatient
       tags: [physician-portal]
       summary: Physician searches for a patient by HIS ID or last name
+      description: |
+        Requires staff access JWT. Roles `physician` or `super_admin`.
+        Physicians are limited to assigned patients. A single match returns one object;
+        multiple matches return an array.
+      security:
+        - staffBearer: []
       parameters:
         - name: q
           in: query
@@ -752,17 +1960,30 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/PhysicianPatientView"
-        "404":
-          description: Patient not found
+                oneOf:
+                  - $ref: "#/components/schemas/PhysicianPatientView"
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/PhysicianPatientView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /physician/patients/{id}/results:
     get:
       operationId: listPatientResultsPhysician
       tags: [physician-portal]
       summary: Physician views patient results
+      description: |
+        Requires staff access JWT. Roles `physician` or `super_admin`.
+        Physicians must be assigned and receive `released` results only.
+      security:
+        - staffBearer: []
       parameters:
         - name: id
           in: path
@@ -779,15 +2000,94 @@ paths:
                 items:
                   $ref: "#/components/schemas/Result"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
+
+  /physician/patients/{patientId}/prescriptions:
+    get:
+      operationId: listPatientPrescriptionsPhysician
+      tags: [physician-portal]
+      summary: List prescriptions for an assigned patient
+      description: |
+        Requires staff access JWT with role physician.
+        Requires patient_physicians assignment. Does not trust client physicianId.
+      security:
+        - staffBearer: []
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Patient prescriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Prescription"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Prescriptions schema not installed
+    post:
+      operationId: createPatientPrescriptionPhysician
+      tags: [physician-portal]
+      summary: Create a prescription for an assigned patient
+      description: |
+        Requires staff access JWT with role physician and patient_physicians assignment.
+        physicianId is derived from the authenticated session. Transactional create.
+      security:
+        - staffBearer: []
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePrescriptionRequest"
+      responses:
+        "201":
+          description: Prescription created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Prescription"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Prescriptions schema not installed
 
   /physician/results/{id}/download:
     get:
       operationId: physicianGetResultDownloadUrl
       tags: [physician-portal]
       summary: Physician gets signed download URL
+      description: |
+        Requires staff access JWT. Roles `physician` or `super_admin`.
+        Physicians require assignment and `released`. Returns `/api/physician/file/{token}`.
+      security:
+        - staffBearer: []
       parameters:
         - name: id
           in: path
@@ -802,9 +2102,54 @@ paths:
               schema:
                 $ref: "#/components/schemas/DownloadUrlResponse"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
+
+  /physician/file/{token}:
+    get:
+      operationId: downloadPhysicianResultFile
+      tags: [physician-portal]
+      summary: Stream a result file for an assigned physician
+      description: |
+        No Bearer header. Download JWT `forType=physician`. Re-checks assignment and `released`.
+        Query `inline=1` uses Content-Disposition inline. Does not expose storage paths.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: inline
+          in: query
+          schema:
+            type: string
+            description: Set to `1` for inline Content-Disposition
+      responses:
+        "200":
+          description: File bytes
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   # Audit Logs
   /audit-logs:
@@ -812,6 +2157,7 @@ paths:
       operationId: listAuditLogs
       tags: [audit]
       summary: List audit log entries
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
       parameters:
         - name: userId
           in: query
@@ -850,10 +2196,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuditLogListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          description: Forbidden
+          $ref: "#/components/responses/Forbidden"
 
   # Dashboard
   /dashboard/stats:
@@ -861,6 +2209,7 @@ paths:
       operationId: getDashboardStats
       tags: [dashboard]
       summary: Get dashboard summary statistics
+      description: Requires staff access JWT. Any authenticated staff role.
       responses:
         "200":
           description: Dashboard stats
@@ -869,13 +2218,14 @@ paths:
               schema:
                 $ref: "#/components/schemas/DashboardStats"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
 
   /dashboard/uploads-by-department:
     get:
       operationId: getUploadsByDepartment
       tags: [dashboard]
       summary: Get upload counts grouped by department/category
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
       responses:
         "200":
           description: Uploads by department
@@ -886,13 +2236,16 @@ paths:
                 items:
                   $ref: "#/components/schemas/DepartmentUploadCount"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /dashboard/recent-activity:
     get:
       operationId: getRecentActivity
       tags: [dashboard]
       summary: Get recent upload and audit activity
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
       parameters:
         - name: limit
           in: query
@@ -909,13 +2262,16 @@ paths:
                 items:
                   $ref: "#/components/schemas/AuditLog"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /dashboard/daily-uploads:
     get:
       operationId: getDailyUploads
       tags: [dashboard]
       summary: Get daily upload counts for the last 30 days
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
       responses:
         "200":
           description: Daily upload counts
@@ -926,13 +2282,16 @@ paths:
                 items:
                   $ref: "#/components/schemas/DailyUploadCount"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /dashboard/top-users:
     get:
       operationId: getTopActiveUsers
       tags: [dashboard]
       summary: Get most active uploading users
+      description: Requires staff access JWT. Roles `super_admin`, `medical_records`.
       responses:
         "200":
           description: Top active users
@@ -943,7 +2302,39 @@ paths:
                 items:
                   $ref: "#/components/schemas/UserActivityStat"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/overview:
+    get:
+      operationId: getAdminOverview
+      tags: [admin]
+      summary: Admin dashboard overview (live ACE_ResultsPortal data)
+      description: |
+        Requires staff access JWT. Role `super_admin` only.
+        Returns real metrics, audit activity, registrations, pending results,
+        system overview series, health checks, and a read-only storage audit.
+        Does not return passwords, access codes, or tokens.
+      security:
+        - staffBearer: []
+      responses:
+        "200":
+          description: Admin overview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Unable to load dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   # Archived Records
   /archive:
@@ -951,6 +2342,11 @@ paths:
       operationId: listArchivedResults
       tags: [archive]
       summary: List archived results
+      description: |
+        Requires staff access JWT. Roles `super_admin`, `medical_records`.
+        Archive is a status, not a file move.
+      security:
+        - staffBearer: []
       parameters:
         - name: search
           in: query
@@ -973,14 +2369,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ArchiveListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          description: Unauthorized
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /archive/{id}/restore:
     post:
       operationId: restoreArchivedResult
       tags: [archive]
-      summary: Restore an archived result to active
+      summary: Restore an archived result to pending
+      description: |
+        Requires staff access JWT. Roles `super_admin`, `medical_records`.
+        Sets status to `pending` (not `released`). Physical file is unchanged.
+      security:
+        - staffBearer: []
       parameters:
         - name: id
           in: path
@@ -989,21 +2394,440 @@ paths:
             type: integer
       responses:
         "200":
-          description: Result restored
+          description: Result restored to pending
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Result"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Not found
+          $ref: "#/components/responses/NotFound"
+
+  /notifications:
+    get:
+      operationId: listNotifications
+      tags: [notifications]
+      summary: List notifications for the authenticated user
+      security:
+        - staffBearer: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: unreadOnly
+          in: query
+          schema: { type: string, enum: ["0", "1", "true", "false"] }
+      responses:
+        "200":
+          description: Paginated notifications for the current user only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/BadRequest"
+
+  /notifications/unread-count:
+    get:
+      operationId: getNotificationUnreadCount
+      tags: [notifications]
+      summary: Unread notification count for the authenticated user
+      security:
+        - staffBearer: []
+      responses:
+        "200":
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /notifications/{id}/read:
+    post:
+      operationId: markNotificationRead
+      tags: [notifications]
+      summary: Mark one of the current user's notifications as read
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated notification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortalNotification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /notifications/read-all:
+    post:
+      operationId: markAllNotificationsRead
+      tags: [notifications]
+      summary: Mark all of the current user's notifications as read
+      security:
+        - staffBearer: []
+      responses:
+        "200":
+          description: Number of rows updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated]
+                properties:
+                  updated: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /announcements:
+    get:
+      operationId: listAnnouncements
+      tags: [announcements]
+      summary: List announcements (drafts only for super_admin when includeDrafts=1)
+      security:
+        - staffBearer: []
+      parameters:
+        - name: includeDrafts
+          in: query
+          schema: { type: string, enum: ["0", "1"] }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        "200":
+          description: Announcement list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createAnnouncement
+      tags: [announcements]
+      summary: Create announcement draft (super_admin)
+      security:
+        - staffBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAnnouncementRequest"
+      responses:
+        "201":
+          description: Created draft
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /announcements/{id}:
+    patch:
+      operationId: updateAnnouncement
+      tags: [announcements]
+      summary: Update unpublished announcement (super_admin)
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated announcement
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /announcements/{id}/publish:
+    post:
+      operationId: publishAnnouncement
+      tags: [announcements]
+      summary: Publish announcement and create recipient notifications
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Published announcement
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /messages/recipients:
+    get:
+      operationId: listMessageRecipients
+      tags: [messages]
+      summary: Search portal accounts the caller is allowed to message
+      description: |
+        Search matches name, username, role, or department name on active portal accounts.
+        Results are authorization-filtered. The caller is excluded. Queries shorter than
+        2 characters return an empty list. There is no employee-id field on portal accounts.
+      security:
+        - staffBearer: []
+      parameters:
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Allowed recipients
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /messages/unread-count:
+    get:
+      operationId: getMessageUnreadCount
+      tags: [messages]
+      summary: Count of threads with unread messages for the caller
+      security:
+        - staffBearer: []
+      responses:
+        "200":
+          description: Unread thread count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count: { type: integer }
+
+  /messages/threads:
+    get:
+      operationId: listMessageThreads
+      tags: [messages]
+      summary: List threads where the caller is a participant
+      security:
+        - staffBearer: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        "200":
+          description: Thread list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createMessageThread
+      tags: [messages]
+      summary: Open or create a 1-to-1 thread with an authorized recipient
+      description: |
+        Subject and body are optional. An existing open 1-to-1 thread for the same
+        pair is reused. A new thread is created only when none is open.
+      security:
+        - staffBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMessageThreadRequest"
+      responses:
+        "200":
+          description: Existing open 1-to-1 thread reused
+        "201":
+          description: Created thread
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /messages/threads/{id}:
+    get:
+      operationId: getMessageThread
+      tags: [messages]
+      summary: Get a thread the caller participates in
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Thread with messages
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteMessageThread
+      tags: [messages]
+      summary: Permanently delete a thread the caller participates in
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Thread deleted
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /messages/threads/{id}/messages:
+    post:
+      operationId: sendThreadMessage
+      tags: [messages]
+      summary: Send a message in a participated open thread
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1 }
+      responses:
+        "201":
+          description: Created message
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /messages/threads/{id}/read:
+    post:
+      operationId: markMessageThreadRead
+      tags: [messages]
+      summary: Update the caller's last_read_at for a thread
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Marked read
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /messages/threads/{id}/close:
+    post:
+      operationId: closeMessageThread
+      tags: [messages]
+      summary: Close a thread the caller participates in
+      security:
+        - staffBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Thread closed
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
 components:
+  securitySchemes:
+    staffBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Staff/physician access JWT. Claim `type` must be `access`.
+        Header `Authorization: Bearer <token>`. Expires in 15 minutes.
+    portalBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Patient portal JWT. Claim `type` must be `portal`.
+        Header `Authorization: Bearer <token>`. Expires in 4 hours.
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
     HealthStatus:
       type: object
       properties:
         status:
           type: string
+          enum: [ok, unhealthy]
       required:
         - status
 
@@ -1020,34 +2844,58 @@ components:
       properties:
         url:
           type: string
+          description: Relative API path such as `/api/results/file/{token}`. Never a filesystem path.
         expiresAt:
           type: string
+          format: date-time
+
+    ResultCategory:
+      type: string
+      enum: [laboratory, radiology, ultrasound, ct_scan, mri, ecg, echo_2d, rehabilitation, other]
+
+    ResultStatus:
+      type: string
+      enum: [pending, released, archived]
 
     # Auth schemas
     LoginCredentials:
       type: object
-      required: [username, password]
+      required: [username, password, portal]
       properties:
         username:
           type: string
         password:
           type: string
-
-    RefreshTokenInput:
-      type: object
-      required: [refreshToken]
-      properties:
-        refreshToken:
+        portal:
           type: string
+          enum: [admin, staff, doctor, patient]
+          description: Login channel stored on the session. Does not grant or replace the user role.
 
-    AuthResponse:
+    SessionRefreshResponse:
       type: object
-      required: [accessToken, refreshToken, user]
+      required: [accessToken, sessionPublicId]
       properties:
         accessToken:
           type: string
-        refreshToken:
+          description: New access JWT. Includes sid equal to sessionPublicId. Does not include the refresh secret.
+        sessionPublicId:
           type: string
+          minLength: 22
+          maxLength: 22
+          description: Stable public session handle. Not a secret.
+
+    AuthResponse:
+      type: object
+      required: [accessToken, sessionPublicId, user]
+      properties:
+        accessToken:
+          type: string
+          description: Access JWT. New logins include sid. Does not include the refresh secret.
+        sessionPublicId:
+          type: string
+          minLength: 22
+          maxLength: 22
+          description: Public session handle. Safe to keep. Not the refresh secret.
         user:
           $ref: "#/components/schemas/User"
 
@@ -1086,7 +2934,7 @@ components:
           type: ["string", "null"]
         role:
           type: string
-          enum: [super_admin, medical_records, laboratory, radiology, physician]
+          enum: [super_admin, medical_records, laboratory, radiology, endoscopy, physician]
         isActive:
           type: boolean
         createdAt:
@@ -1112,7 +2960,7 @@ components:
           type: string
         role:
           type: string
-          enum: [super_admin, medical_records, laboratory, radiology, physician]
+          enum: [super_admin, medical_records, laboratory, radiology, endoscopy, physician]
 
     UserUpdate:
       type: object
@@ -1125,7 +2973,7 @@ components:
           type: ["string", "null"]
         role:
           type: string
-          enum: [super_admin, medical_records, laboratory, radiology, physician]
+          enum: [super_admin, medical_records, laboratory, radiology, endoscopy, physician]
         isActive:
           type: boolean
 
@@ -1147,7 +2995,7 @@ components:
     # Patient schemas
     Patient:
       type: object
-      required: [id, patientHisId, lastName, firstName, dateOfBirth, accessCode, createdAt]
+      required: [id, patientHisId, lastName, firstName, dateOfBirth, createdAt, updatedAt]
       properties:
         id:
           type: integer
@@ -1166,12 +3014,57 @@ components:
         email:
           type: ["string", "null"]
         accessCode:
-          type: string
+          type: ["string", "null"]
+          description: Present only immediately after create or regenerate. Stored as a hash thereafter.
+        accessCodeRequestedAt:
+          type: ["string", "null"]
+          description: ISO timestamp when the patient requested a new results access code from admin.
         createdAt:
           type: string
         updatedAt:
           type: string
         resultCount:
+          type: integer
+        assignedPhysicians:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id:
+                type: integer
+              name:
+                type: string
+
+    PhysicianSummary:
+      type: object
+      required: [id, name, username]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        username:
+          type: string
+
+    AssignedPhysician:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        username:
+          type: string
+        assignedAt:
+          type: string
+
+    AssignPhysicianInput:
+      type: object
+      required: [physicianId]
+      properties:
+        physicianId:
           type: integer
 
     PatientInput:
@@ -1192,6 +3085,9 @@ components:
           type: string
         email:
           type: string
+        physicianId:
+          type: integer
+          description: Optional attending physician user id to assign at creation.
 
     PatientUpdate:
       type: object
@@ -1227,7 +3123,7 @@ components:
     # Result schemas
     Result:
       type: object
-      required: [id, patientId, category, fileName, fileType, releaseOption, status, uploadedById, uploadedAt, createdAt]
+      required: [id, patientId, category, fileName, originalFileName, fileType, releaseOption, status, uploadedById, uploadedAt, createdAt]
       properties:
         id:
           type: integer
@@ -1238,12 +3134,13 @@ components:
         patientName:
           type: string
         category:
-          type: string
-          enum: [laboratory, radiology, ultrasound, ct_scan, mri, ecg, echo_2d, rehabilitation, other]
+          $ref: "#/components/schemas/ResultCategory"
         fileName:
           type: string
+          description: Relative storage key (legacy basename or `results/{id}/result.{ext}`). Not an OS path.
         originalFileName:
           type: string
+          description: Sanitized original filename for Content-Disposition only.
         fileType:
           type: string
           enum: [pdf, jpeg, png]
@@ -1257,8 +3154,7 @@ components:
         dateReleased:
           type: ["string", "null"]
         status:
-          type: string
-          enum: [pending, released, archived]
+          $ref: "#/components/schemas/ResultStatus"
         remarks:
           type: ["string", "null"]
         uploadedById:
@@ -1269,16 +3165,96 @@ components:
           type: string
         createdAt:
           type: string
+        assignedPhysician:
+          type: ["object", "null"]
+          description: Reviewing physician for private result assignment (Phase 7B). Null when unassigned.
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+        assignedPhysicians:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              name:
+                type: string
+        reviews:
+          type: array
+          description: Staff view of assigned physicians left-joined to their reviews. Omitted when review storage is not installed, and omitted from physician responses.
+          items:
+            $ref: "#/components/schemas/StaffResultReview"
+        myReview:
+          $ref: "#/components/schemas/PhysicianResultReview"
+
+    ResultReviewInput:
+      type: object
+      properties:
+        comment:
+          type: ["string", "null"]
+          description: Optional physician comment. Omitted, null, or whitespace-only is stored as null. Maximum 4000 characters.
+
+    ResultReview:
+      type: object
+      required: [resultId, physicianId, reviewed, reviewedAt]
+      properties:
+        resultId:
+          type: integer
+        physicianId:
+          type: integer
+        physicianName:
+          type: string
+        reviewed:
+          type: boolean
+        reviewedAt:
+          type: string
+          format: date-time
+        comment:
+          type: ["string", "null"]
+
+    StaffResultReview:
+      type: object
+      required: [physicianId, physicianName, reviewed]
+      properties:
+        physicianId:
+          type: integer
+        physicianName:
+          type: string
+        reviewed:
+          type: boolean
+        reviewedAt:
+          type: ["string", "null"]
+          format: date-time
+        comment:
+          type: ["string", "null"]
+
+    PhysicianResultReview:
+      type: object
+      required: [reviewed]
+      properties:
+        reviewed:
+          type: boolean
+        reviewedAt:
+          type: ["string", "null"]
+          format: date-time
+        comment:
+          type: ["string", "null"]
 
     ResultUploadInput:
       type: object
-      required: [patientId, category, releaseOption]
+      required: [file, patientId, category, releaseOption]
       properties:
+        file:
+          type: string
+          format: binary
+          description: Diagnostic file. Field name `file`. PDF, JPEG, or PNG. Maximum 50 MiB unless the configured max file size overrides.
         patientId:
           type: integer
         category:
-          type: string
-          enum: [laboratory, radiology, ultrasound, ct_scan, mri, ecg, echo_2d, rehabilitation, other]
+          $ref: "#/components/schemas/ResultCategory"
         releaseOption:
           type: string
           enum: [immediate, after_physician_review, scheduled]
@@ -1286,13 +3262,25 @@ components:
           type: string
         remarks:
           type: string
+        physicianId:
+          type: integer
+          description: Optional reviewing physician user id. Server validates active physician role; client value is never trusted for authorization.
+        assignedPhysicianId:
+          type: integer
+          description: Alias for physicianId (optional).
+
+    ResultAssignmentInput:
+      type: object
+      properties:
+        physicianId:
+          type: ["integer", "null"]
+          description: Reviewing physician user id, or null to clear assignment. Server validates active physician role.
 
     ResultUpdate:
       type: object
       properties:
         category:
-          type: string
-          enum: [laboratory, radiology, ultrasound, ct_scan, mri, ecg, echo_2d, rehabilitation, other]
+          $ref: "#/components/schemas/ResultCategory"
         releaseOption:
           type: string
           enum: [immediate, after_physician_review, scheduled]
@@ -1301,8 +3289,7 @@ components:
         remarks:
           type: ["string", "null"]
         status:
-          type: string
-          enum: [pending, released, archived]
+          $ref: "#/components/schemas/ResultStatus"
 
     ReleaseResultInput:
       type: object
@@ -1330,6 +3317,110 @@ components:
           type: integer
 
     # Patient Portal schemas
+    PortalIdentityVerification:
+      type: object
+      required: [patientHisId, lastName, dateOfBirth]
+      properties:
+        patientHisId:
+          type: string
+        lastName:
+          type: string
+        dateOfBirth:
+          type: string
+          format: date
+          description: ISO date (YYYY-MM-DD)
+
+    PortalIdentityVerificationResult:
+      type: object
+      required: [verified, isNewPortalAccount]
+      properties:
+        verified:
+          type: boolean
+          const: true
+        isNewPortalAccount:
+          type: boolean
+        registrationToken:
+          type: string
+          description: Short-lived token for step 2 registration (new accounts only)
+
+    PortalAccountRegistration:
+      type: object
+      required: [registrationToken, email, confirmEmail, password, confirmPassword]
+      properties:
+        registrationToken:
+          type: string
+        email:
+          type: string
+          format: email
+        confirmEmail:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        confirmPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
+
+    PortalAccountRegistrationResult:
+      type: object
+      required: [created, accessCode, patient]
+      properties:
+        created:
+          type: boolean
+          const: true
+        accessCode:
+          type: string
+          description: Plaintext access code returned only once
+        patient:
+          $ref: "#/components/schemas/PortalVerifiedPatient"
+
+    PortalRecoveryRequestResult:
+      type: object
+      properties:
+        recoveryToken:
+          type: string
+        maskedEmail:
+          type: string
+        message:
+          type: string
+        assistedRecovery:
+          type: boolean
+
+    PortalRecoveryConfirm:
+      type: object
+      required: [recoveryToken, otp, newPassword]
+      properties:
+        recoveryToken:
+          type: string
+        otp:
+          type: string
+          pattern: "^\\d{6}$"
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 128
+
+    PortalVerifiedPatient:
+      type: object
+      required: [id, patientHisId]
+      properties:
+        id:
+          type: integer
+        patientHisId:
+          type: string
+        firstName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+        lastName:
+          type: string
+        dateOfBirth:
+          type: string
+          format: date
+
     PatientAccessVerification:
       type: object
       required: [patientHisId, lastName, accessCode]
@@ -1387,6 +3478,201 @@ components:
           type: string
         dateReleased:
           type: ["string", "null"]
+
+    PortalOverviewPatient:
+      type: object
+      required: [id, patientHisId, firstName, lastName, dateOfBirth]
+      properties:
+        id:
+          type: integer
+        patientHisId:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+        dateOfBirth:
+          type: string
+        mobileNumber:
+          type: ["string", "null"]
+        email:
+          type: ["string", "null"]
+
+    PortalProfile:
+      type: object
+      required:
+        - patientHisId
+        - firstName
+        - lastName
+        - dateOfBirth
+        - accountStatus
+      properties:
+        patientHisId:
+          type: string
+        firstName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+        lastName:
+          type: string
+        dateOfBirth:
+          type: string
+        email:
+          type: ["string", "null"]
+        mobileNumber:
+          type: ["string", "null"]
+        accountStatus:
+          type: string
+          enum: [active]
+        accountEmail:
+          type: ["string", "null"]
+        lastLoginAt:
+          type: ["string", "null"]
+          format: date-time
+
+    PortalProfileUpdate:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        mobileNumber:
+          type: ["string", "null"]
+          maxLength: 32
+      additionalProperties: false
+
+    PortalAssignedDoctor:
+      type: object
+      required: [id, name, assignedAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        assignedAt:
+          type: string
+          format: date-time
+
+    PortalOverview:
+      type: object
+      required: [patient, assignedDoctors, appointments]
+      properties:
+        patient:
+          $ref: "#/components/schemas/PortalOverviewPatient"
+        assignedDoctors:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortalAssignedDoctor"
+        appointments:
+          $ref: "#/components/schemas/PortalAppointments"
+
+    PortalAppointment:
+      type: object
+      required: [id, reference, date, status, reasonForVisit]
+      properties:
+        id:
+          type: string
+        reference:
+          type: string
+        date:
+          type: string
+          format: date
+        time:
+          type: ["string", "null"]
+        status:
+          type: string
+        doctorName:
+          type: ["string", "null"]
+        departmentName:
+          type: ["string", "null"]
+        specialtyName:
+          type: ["string", "null"]
+        reasonForVisit:
+          type: string
+
+    PortalAppointments:
+      type: object
+      required: [status, today, next]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable, unconfigured]
+        today:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortalAppointment"
+        next:
+          oneOf:
+            - $ref: "#/components/schemas/PortalAppointment"
+            - type: "null"
+        message:
+          type: string
+
+    PortalCareHistorySource:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable, unconfigured]
+        message:
+          type: string
+
+    PortalCareHistorySources:
+      type: object
+      required: [appointments, results, prescriptions]
+      properties:
+        appointments:
+          $ref: "#/components/schemas/PortalCareHistorySource"
+        results:
+          $ref: "#/components/schemas/PortalCareHistorySource"
+        prescriptions:
+          $ref: "#/components/schemas/PortalCareHistorySource"
+
+    PortalCareHistoryEvent:
+      type: object
+      required: [type, date, title, subtitle, summary, href, entityId, appointmentId, doctorName, status, appointment]
+      properties:
+        type:
+          type: string
+          enum: [appointment, result, prescription]
+        date:
+          type: string
+          description: Event date/time used for ordering (ISO or date+time composite)
+        title:
+          type: string
+        subtitle:
+          type: ["string", "null"]
+        summary:
+          type: ["string", "null"]
+        href:
+          type: ["string", "null"]
+        entityId:
+          type: ["integer", "null"]
+        appointmentId:
+          type: ["string", "null"]
+        doctorName:
+          type: ["string", "null"]
+        status:
+          type: ["string", "null"]
+        appointment:
+          oneOf:
+            - $ref: "#/components/schemas/PortalAppointment"
+            - type: "null"
+
+    PortalCareHistory:
+      type: object
+      required: [events, sources]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortalCareHistoryEvent"
+        sources:
+          $ref: "#/components/schemas/PortalCareHistorySources"
 
     # Physician Portal schemas
     PhysicianPatientView:
@@ -1451,7 +3737,7 @@ components:
     # Dashboard schemas
     DashboardStats:
       type: object
-      required: [totalPatients, totalResults, totalReleased, totalPending, totalDownloads, totalStaffUsers, totalPhysicians]
+      required: [totalPatients, totalResults, totalReleased, totalPending, totalArchived, totalDownloads, totalStaffUsers, totalPhysicians, uploadsToday, uploadsThisMonth]
       properties:
         totalPatients:
           type: integer
@@ -1460,6 +3746,8 @@ components:
         totalReleased:
           type: integer
         totalPending:
+          type: integer
+        totalArchived:
           type: integer
         totalDownloads:
           type: integer
@@ -1503,7 +3791,326 @@ components:
         uploadCount:
           type: integer
 
+    AdminOverviewMetrics:
+      type: object
+      required:
+        - totalPatients
+        - staffAccounts
+        - doctorAccounts
+        - totalResults
+        - pendingRelease
+        - totalReleased
+        - totalArchived
+        - uploadsToday
+      properties:
+        totalPatients:
+          type: integer
+        staffAccounts:
+          type: integer
+        doctorAccounts:
+          type: integer
+        totalResults:
+          type: integer
+        pendingRelease:
+          type: integer
+        totalReleased:
+          type: integer
+        totalArchived:
+          type: integer
+        uploadsToday:
+          type: integer
+
+    AdminOverviewSeriesPoint:
+      type: object
+      required: [date, uploaded, released, registrations, logins]
+      properties:
+        date:
+          type: string
+        uploaded:
+          type: integer
+        released:
+          type: integer
+        registrations:
+          type: integer
+        logins:
+          type: integer
+
+    AdminOverviewRegistration:
+      type: object
+      required: [id, firstName, lastName, middleName, patientHisId, createdAt]
+      properties:
+        id:
+          type: integer
+        firstName:
+          type: string
+        lastName:
+          type: string
+        middleName:
+          type: ["string", "null"]
+        patientHisId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    AdminOverviewPendingResult:
+      type: object
+      required:
+        - id
+        - originalFileName
+        - category
+        - status
+        - uploadedAt
+        - patientHisId
+        - patientFirstName
+        - patientLastName
+      properties:
+        id:
+          type: integer
+        originalFileName:
+          type: string
+        category:
+          type: string
+        status:
+          type: string
+        uploadedAt:
+          type: string
+          format: date-time
+        patientHisId:
+          type: string
+        patientFirstName:
+          type: string
+        patientLastName:
+          type: string
+
+    AdminOverviewHealthItem:
+      type: object
+      required: [id, name, state, detail]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        state:
+          type: string
+          enum: [Operational, Critical, Not monitored]
+        detail:
+          type: string
+
+    AdminOverviewSystemHealth:
+      type: object
+      required: [overall, items]
+      properties:
+        overall:
+          type: string
+          enum: [ok, degraded, unknown]
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminOverviewHealthItem"
+
+    AdminOverviewSystemOverview:
+      type: object
+      required: [days, points, hasData]
+      properties:
+        days:
+          type: integer
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminOverviewSeriesPoint"
+        hasData:
+          type: boolean
+
+    PortalStorageCompactSummary:
+      type: object
+      required:
+        - available
+        - databaseName
+        - serverTotalGB
+        - serverUsedGB
+        - serverFreeGB
+        - serverUsedPercent
+        - databaseAllocatedGB
+        - databaseDataAllocatedGB
+        - databaseDataUsedGB
+        - databaseDataFreeGB
+        - logAllocatedGB
+        - logUsedGB
+        - databaseUsedPercent
+        - resultFilesGB
+        - resultFilesBytes
+        - resultFileCount
+        - error
+      properties:
+        available:
+          type: boolean
+        databaseName:
+          type: string
+        serverTotalGB:
+          type: ["number", "null"]
+        serverUsedGB:
+          type: ["number", "null"]
+        serverFreeGB:
+          type: ["number", "null"]
+        serverUsedPercent:
+          type: ["number", "null"]
+        databaseAllocatedGB:
+          type: ["number", "null"]
+          description: Data + log file size allocated to ACE_ResultsPortal
+        databaseDataAllocatedGB:
+          type: ["number", "null"]
+        databaseDataUsedGB:
+          type: ["number", "null"]
+        databaseDataFreeGB:
+          type: ["number", "null"]
+        logAllocatedGB:
+          type: ["number", "null"]
+        logUsedGB:
+          type: ["number", "null"]
+        databaseUsedPercent:
+          type: ["number", "null"]
+          description: Percent of ACE_ResultsPortal allocated capacity in use
+        resultFilesGB:
+          type: ["number", "null"]
+        resultFilesBytes:
+          type: ["number", "null"]
+        resultFileCount:
+          type: ["integer", "null"]
+        error:
+          type: ["string", "null"]
+
+    AdminOverview:
+      type: object
+      required:
+        - metrics
+        - activity
+        - recentRegistrations
+        - pendingResults
+        - systemOverview
+        - systemHealth
+        - storage
+        - messagingAvailable
+      properties:
+        metrics:
+          $ref: "#/components/schemas/AdminOverviewMetrics"
+        activity:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLog"
+        recentRegistrations:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminOverviewRegistration"
+        pendingResults:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminOverviewPendingResult"
+        systemOverview:
+          $ref: "#/components/schemas/AdminOverviewSystemOverview"
+        systemHealth:
+          $ref: "#/components/schemas/AdminOverviewSystemHealth"
+        storage:
+          $ref: "#/components/schemas/PortalStorageCompactSummary"
+        messagingAvailable:
+          type: boolean
+
     # Archive schemas
+    PrescriptionItem:
+      type: object
+      required: [id, medicineName]
+      properties:
+        id:
+          type: integer
+        medicineName:
+          type: string
+        genericName:
+          type: ["string", "null"]
+        dosage:
+          type: ["string", "null"]
+        dosageUnit:
+          type: ["string", "null"]
+        route:
+          type: ["string", "null"]
+        frequency:
+          type: ["string", "null"]
+        duration:
+          type: ["string", "null"]
+        quantity:
+          type: ["string", "null"]
+        instructions:
+          type: ["string", "null"]
+
+    Prescription:
+      type: object
+      required: [id, patientId, physicianId, physicianName, status, createdAt, updatedAt, items]
+      properties:
+        id:
+          type: integer
+        patientId:
+          type: integer
+        physicianId:
+          type: integer
+        physicianName:
+          type: string
+        status:
+          type: string
+          enum: [active, completed, cancelled]
+        diagnosisOrIndication:
+          type: ["string", "null"]
+        generalInstructions:
+          type: ["string", "null"]
+        notes:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrescriptionItem"
+
+    CreatePrescriptionItemInput:
+      type: object
+      required: [medicineName, dosage, frequency]
+      properties:
+        medicineName:
+          type: string
+        genericName:
+          type: string
+        dosage:
+          type: string
+        dosageUnit:
+          type: string
+        route:
+          type: string
+        frequency:
+          type: string
+        duration:
+          type: string
+        quantity:
+          type: string
+        instructions:
+          type: string
+
+    CreatePrescriptionRequest:
+      type: object
+      required: [items]
+      properties:
+        diagnosisOrIndication:
+          type: string
+        generalInstructions:
+          type: string
+        notes:
+          type: string
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/CreatePrescriptionItemInput"
+
     ArchivedResult:
       type: object
       required: [id, patientId, patientHisId, category, originalFileName, fileType, archivedAt, originalUploadedAt]
@@ -1543,3 +4150,58 @@ components:
           type: integer
         limit:
           type: integer
+
+    PortalNotification:
+      type: object
+      required: [id, type, title, body, priority, isRead, createdAt]
+      properties:
+        id: { type: integer }
+        type: { type: string }
+        title: { type: string }
+        body: { type: string }
+        entityType: { type: ["string", "null"] }
+        entityId: { type: ["integer", "null"] }
+        priority: { type: string, enum: [normal, important, urgent] }
+        isRead: { type: boolean }
+        readAt: { type: ["string", "null"] }
+        createdAt: { type: string }
+        expiresAt: { type: ["string", "null"] }
+
+    NotificationListResponse:
+      type: object
+      required: [data, total, page, limit]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortalNotification"
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+
+    CreateAnnouncementRequest:
+      type: object
+      required: [title, body, targets]
+      properties:
+        title: { type: string, maxLength: 255 }
+        body: { type: string }
+        priority: { type: string, enum: [normal, important, urgent] }
+        expiresAt: { type: ["string", "null"] }
+        targets:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [targetType]
+            properties:
+              targetType: { type: string, enum: [all_staff, all_physicians, department, all_patients] }
+              targetValue: { type: ["string", "null"] }
+
+    CreateMessageThreadRequest:
+      type: object
+      required: [recipientUserId]
+      properties:
+        subject: { type: string, maxLength: 255 }
+        body: { type: string, maxLength: 4000 }
+        recipientUserId: { type: integer }
+        patientId: { type: ["integer", "null"] }

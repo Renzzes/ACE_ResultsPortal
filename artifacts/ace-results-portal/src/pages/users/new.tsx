@@ -4,16 +4,18 @@ import { useCreateUser } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
-import { ArrowLeft, Eye, EyeOff } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 
 const ROLES = [
   { value: "super_admin", label: "Super Admin" },
   { value: "medical_records", label: "Medical Records" },
   { value: "laboratory", label: "Laboratory Staff" },
   { value: "radiology", label: "Radiology Staff" },
+  { value: "endoscopy", label: "Endoscopy Staff" },
   { value: "physician", label: "Authorized Physician" },
 ];
 
@@ -21,7 +23,6 @@ export default function NewUserPage() {
   const [, setLocation] = useLocation();
   const { auth } = useAuth();
   const { toast } = useToast();
-  const [showPw, setShowPw] = useState(false);
   const [form, setForm] = useState({
     username: "", password: "", firstName: "", lastName: "", email: "", role: "medical_records",
   });
@@ -30,7 +31,7 @@ export default function NewUserPage() {
 
   if (auth.user?.role !== "super_admin") {
     return (
-      <StaffLayout>
+      <StaffLayout title="New User">
         <div className="text-center py-16">
           <p className="text-xl font-semibold text-destructive">Access Denied</p>
         </div>
@@ -69,8 +70,8 @@ export default function NewUserPage() {
   };
 
   return (
-    <StaffLayout>
-      <div className="max-w-lg space-y-6">
+    <StaffLayout title="New User">
+      <div className="w-full max-w-3xl space-y-6">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={() => setLocation("/users")}>
             <ArrowLeft className="w-4 h-4 mr-1" />Back
@@ -100,16 +101,7 @@ export default function NewUserPage() {
 
           <div className="space-y-1.5">
             <Label htmlFor="password">Password <span className="text-destructive">*</span></Label>
-            <div className="relative">
-              <Input id="password" type={showPw ? "text" : "password"} placeholder="Min. 8 characters" {...field("password")} />
-              <button
-                type="button"
-                onClick={() => setShowPw(v => !v)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
+            <PasswordInput id="password" placeholder="Min. 8 characters" {...field("password")} />
           </div>
 
           <div className="space-y-1.5">

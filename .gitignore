@@ -47,3 +47,16 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Secrets — never commit
+.env
+.env.local
+.env.production
+.env.*.local
+.env.*
+!.env.example
+
+# Result file storage — binaries are not source
+artifacts/api-server/uploads/
+artifacts/api-server/data/
+var/result-files/
