@@ -18,12 +18,16 @@
     "test-patient-contact-support": "tsx --test ./src/test-patient-contact-support.ts",
     "test-p1-credential-workflows": "tsx --test ./src/test-p1-credential-workflows.ts",
     "test-email-diagnostic-access-code": "tsx --test ./src/test-email-diagnostic-access-code.ts",
+    "test-result-document-access-codes": "tsx --test ./src/test-result-document-access-codes.ts",
+    "test-document-access-e2e": "tsx --test ./src/test-document-access-e2e.ts",
+    "test-print-ready-visual": "tsx --test ./src/test-print-ready-visual.ts",
     "test-staff-hospital-lookup": "tsx --test ./src/test-staff-hospital-lookup.ts",
     "test-his-credential-fail-closed": "tsx --test ./src/test-his-credential-fail-closed.ts",
     "test-staff-patient-history": "tsx --test ./src/test-staff-patient-history.ts",
     "test-staff-patients-directory": "tsx --test ./src/test-staff-patients-directory.ts",
     "test-staff-result-workflow": "tsx --test ./src/test-staff-result-workflow.ts",
     "test-result-reviews": "tsx --test ./src/test-result-reviews.ts",
+    "test-browser-workflow-verification": "tsx --test ./src/test-browser-workflow-verification.ts",
     "test-phase-h-workflow": "tsx --test ./src/test-phase-h-workflow.ts",
     "test-phase-h4-portal-isolation": "tsx --test ./src/test-phase-h4-portal-isolation.ts",
     "test-phase-h51-auth-sessions-schema": "tsx --test ./src/test-phase-h51-auth-sessions-schema.ts",
@@ -54,15 +58,19 @@
     "test-patient-care-history-security": "tsx --test ./src/test-patient-care-history-security.ts",
     "inspect-shanscheduler": "tsx ./src/inspect-shanscheduler-schema.ts",
     "inspect-livedb": "tsx ./src/inspect-livedb-schema.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json --noEmit"
   },
   "dependencies": {
     "@workspace/db": "workspace:*",
-    "bcryptjs": "^3.0.3"
+    "bcryptjs": "^3.0.3",
+    "pdf-lib": "1.17.1"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "^1.0.11",
     "@types/bcryptjs": "^3.0.0",
     "@types/node": "catalog:",
+    "pdfjs-dist": "4.10.38",
     "tsx": "catalog:"
   }
 }

@@ -96,8 +96,10 @@ test("portal JWT contains patientId and type portal only when login succeeds", a
       password: testPassword,
       confirmPassword: testPassword,
     });
-    if (registered.status !== 200 || typeof registered.data.accessCode !== "string") return;
-    accessCode = registered.data.accessCode;
+    if (registered.status !== 200) return;
+    if (typeof registered.data.accessCode === "string") {
+      accessCode = registered.data.accessCode;
+    }
   } else {
     return;
   }
@@ -118,16 +120,17 @@ test("portal JWT contains patientId and type portal only when login succeeds", a
   assert.equal("accessCode" in payload, false);
   assert.equal("password" in payload, false);
 
-  const unlock = await fetch(`${API}/api/portal/verify`, {
+  // Document unlock requires resultId; bare accessCode must not grant a global unlock.
+  const unlockMissingResult = await fetch(`${API}/api/portal/verify`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${String(token)}`,
     },
-    body: JSON.stringify({ accessCode }),
+    body: JSON.stringify({ accessCode: accessCode ?? "ACE-TEST-CODE" }),
   });
-  if (unlock.status === 404) return;
-  assert.equal(unlock.status, 200);
+  if (unlockMissingResult.status === 404) return;
+  assert.equal(unlockMissingResult.status, 400);
 });
 
 test("recover request rejects invalid identity", async () => {

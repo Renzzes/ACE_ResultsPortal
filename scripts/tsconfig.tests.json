@@ -1,0 +1,29 @@
+﻿{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["es2022", "dom"],
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../artifacts/ace-results-portal/src/*"]
+    }
+  },
+  "include": [
+    "*.d.ts",
+    "src/types/**/*.d.ts",
+    "src/department-test-fixture.ts",
+    "src/test-result-document-access-codes.ts",
+    "src/test-document-access-e2e.ts",
+    "src/test-print-ready-visual.ts",
+    "src/lib/test-storage-isolation.ts",
+    "src/test-result-physician-assignment.ts",
+    "src/test-result-physician-copy.ts",
+    "src/test-result-reviews.ts",
+    "src/test-rbac-authorization.ts",
+    "src/test-browser-workflow-verification.ts"
+  ]
+}

@@ -16,6 +16,11 @@ export interface RootEnvLoadResult {
 
 let cached: RootEnvLoadResult | null = null;
 
+/** Test/handoff helper: clear cache so ACERPTS_ROOT / cwd changes take effect. */
+export function resetRootEnvCache(): void {
+  cached = null;
+}
+
 function hasProductionAppLayout(dir: string): boolean {
   const envPath = path.join(dir, ENV_FILENAME);
   if (!fs.existsSync(envPath) || !fs.statSync(envPath).isFile()) {

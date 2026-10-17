@@ -44,6 +44,11 @@ function result(overrides: Partial<ResultRow> = {}): ResultRow {
     uploadedAt: new Date("2026-10-01T00:00:00Z"),
     createdAt: new Date("2026-10-01T00:00:00Z"),
     updatedAt: new Date("2026-10-01T00:00:00Z"),
+    accessCodeHash: null,
+    accessCodeEncrypted: null,
+    accessCodeIssuedAt: null,
+    accessCodeEmailedAt: null,
+    accessCodeEmailStatus: null,
     ...overrides,
   };
 }
@@ -322,7 +327,8 @@ test("31 review persistence does not change result status", () => {
   assert.equal(before.status, "pending");
   const handler = reviewRoute.slice(reviewRoute.indexOf('router.put("/results/:id/review"'));
   assert.doesNotMatch(handler, /updateResult\(/);
-  assert.doesNotMatch(handler, /status:/);
+  // HTTP res.status(...) is allowed; review must not mutate result workflow status fields.
+  assert.doesNotMatch(handler, /status:\s*["'](?:pending|released|archived|reviewed)/);
 });
 
 test("32 review persistence does not change remarks", () => {

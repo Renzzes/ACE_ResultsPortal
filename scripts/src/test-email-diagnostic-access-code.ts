@@ -165,18 +165,19 @@ test("setup ephemeral API and registration access-code fixtures", async () => {
   }
 });
 
-test("success screen source includes Email this Access Code and unavailable/uncertain handling", async () => {
+test("registration success screen does not disclose a patient-level access code", async () => {
   const page = await import("node:fs").then((fs) =>
     fs.readFileSync(new URL("../../artifacts/ace-results-portal/src/pages/patients/new.tsx", import.meta.url), "utf8"),
   );
-  assert.match(page, /Email this Access Code/);
-  assert.match(page, /Add Patient Email/);
-  assert.match(page, /email-diagnostic-access-code/);
-  assert.match(page, /An email address is required to send this access code/);
-  assert.match(page, /Email accepted for sending/);
-  assert.match(page, /Delivery uncertain/);
-  assert.match(page, /Open Patient to Reissue Code/);
-  assert.match(page, /pending_code_unavailable/);
+  // Document access codes are issued on result upload, not at registration.
+  assert.match(page, /Patient Registered/);
+  assert.match(page, /View Patient/);
+  assert.match(page, /Upload Result/);
+  assert.match(page, /Document access codes are issued when a result is uploaded/);
+  assert.doesNotMatch(page, /Email this Access Code/);
+  assert.doesNotMatch(page, /Secure Access Code/);
+  assert.doesNotMatch(page, /Copy Access Code/);
+  assert.doesNotMatch(page, /email-diagnostic-access-code/);
 });
 
 test("sending emails the pending registration code without changing the hash or creating a portal user", async () => {

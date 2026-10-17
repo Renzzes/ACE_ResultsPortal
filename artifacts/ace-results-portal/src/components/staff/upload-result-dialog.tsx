@@ -44,7 +44,7 @@ export function UploadResultDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  patient: { id: number; patientHisId: string; name: string };
+  patient: { id: number; patientHisId: string; name: string; email?: string | null };
   onUploaded?: () => void;
 }) {
   const { toast } = useToast();
@@ -54,6 +54,7 @@ export function UploadResultDialog({
   const [releaseOption, setReleaseOption] = useState("immediate");
   const [scheduledDate, setScheduledDate] = useState("");
   const [remarks, setRemarks] = useState("");
+  const [recipientEmail, setRecipientEmail] = useState(patient.email?.trim() ?? "");
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -66,6 +67,7 @@ export function UploadResultDialog({
 
   useEffect(() => {
     if (!open) return;
+    setRecipientEmail(patient.email?.trim() ?? "");
     let cancelled = false;
     void customFetch<UploadPhysician[]>(`/api/patients/${patient.id}/physicians`)
       .then((rows) => {
@@ -83,7 +85,7 @@ export function UploadResultDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, patient.id]);
+  }, [open, patient.id, patient.email]);
 
   const {
     data: physiciansData,
@@ -104,6 +106,7 @@ export function UploadResultDialog({
     setReleaseOption("immediate");
     setScheduledDate("");
     setRemarks("");
+    setRecipientEmail(patient.email?.trim() ?? "");
     setFile(null);
     setSelectedDoctors([]);
     setAttendingPhysicians([]);
@@ -124,11 +127,21 @@ export function UploadResultDialog({
       toast({ title: "Please select a result category", variant: "destructive" });
       return;
     }
+    const email = recipientEmail.trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      toast({
+        title: "Patient Email Address required",
+        description: "Enter a valid email to send the document access code.",
+        variant: "destructive",
+      });
+      return;
+    }
 
     setUploading(true);
     const formData = new FormData();
     formData.append("patientId", String(patient.id));
     formData.append("releaseOption", releaseOption);
+    formData.append("recipientEmail", email);
     if (needsCategory) formData.append("category", category);
     if (releaseOption === "scheduled" && scheduledDate) formData.append("scheduledReleaseDate", scheduledDate);
     if (remarks) formData.append("remarks", remarks);
@@ -136,11 +149,21 @@ export function UploadResultDialog({
     formData.append("file", file);
 
     try {
-      await customFetch("/api/results/upload", {
+      const uploaded = await customFetch<{
+        accessCodeEmail?: { accepted?: boolean; error?: string | null };
+      }>("/api/results/upload", {
         method: "POST",
         body: formData,
       });
-      toast({ title: "Result uploaded successfully" });
+      if (uploaded?.accessCodeEmail && uploaded.accessCodeEmail.accepted === false) {
+        toast({
+          title: "Document uploaded; access-code email failed",
+          description: uploaded.accessCodeEmail.error ?? "Resend from the result actions when ready.",
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Result uploaded and access code emailed" });
+      }
       reset();
       onOpenChange(false);
       onUploaded?.();
@@ -174,6 +197,22 @@ export function UploadResultDialog({
           <div className="rounded-xl border border-[hsl(var(--st-border))] bg-[hsl(var(--st-cream))] px-3 py-2">
             <p className="text-sm font-medium text-[hsl(var(--st-text))]">{patient.name}</p>
             <p className="text-xs font-mono st-muted">{patient.patientHisId}</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="upload-recipient-email">
+              Patient Email Address <span className="text-[hsl(var(--st-maroon))]">*</span>
+            </Label>
+            <Input
+              id="upload-recipient-email"
+              type="email"
+              autoComplete="email"
+              value={recipientEmail}
+              onChange={(e) => setRecipientEmail(e.target.value)}
+              placeholder="patient@example.com"
+              required
+            />
+            <p className="text-xs st-muted">Used to email this document&apos;s access code.</p>
           </div>
 
           {needsCategory ? (

@@ -1,18 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
-import { Redirect, useLocation, useSearch } from "wouter";
+import { useMemo, useState } from "react";
+import { Redirect, useSearch } from "wouter";
 import {
   getGetPortalResultsQueryKey,
+  getPortalResultDownloadUrl,
   useGetPortalResults,
-  ApiError,
 } from "@workspace/api-client-react";
 import { useAuth } from "@/lib/auth";
 import { PatientLayout } from "@/components/layout/patient-layout";
 import { DepartmentFilter } from "@/components/portal/department-filter";
 import { PortalResultsUnlockDialog } from "@/components/portal/results-unlock-dialog";
 import {
-  getStoredPortalResultsAccessCode,
-  clearStoredPortalResultsAccessCodeOnLock,
-  unlockPortalResults,
+  beginPortalResultDownload,
+  endPortalResultDownload,
+  getStoredPortalResultAccessCode,
+  unlockPortalResult,
 } from "@/lib/portal-results-access";
 import {
   ResultDownloadButton,
@@ -30,11 +31,10 @@ import {
   sortPortalResultsByRelease,
 } from "@/lib/patient-identity";
 import { useToast } from "@/hooks/use-toast";
-import { Download, Eye, FileText } from "lucide-react";
+import { Download, Eye, FileText, Lock } from "lucide-react";
 
 export default function PortalResultsPage() {
   const { portalAuth } = useAuth();
-  const [, setLocation] = useLocation();
   const { toast } = useToast();
   const searchStr = useSearch();
   const searchQuery = (new URLSearchParams(searchStr).get("q") ?? "").trim().toLowerCase();
@@ -45,43 +45,85 @@ export default function PortalResultsPage() {
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [requestBusy, setRequestBusy] = useState(false);
   const [requestMessage, setRequestMessage] = useState<string | null>(null);
-  const [resultsUnlocked, setResultsUnlocked] = useState(() => Boolean(getStoredPortalResultsAccessCode()));
+  const [unlockResultId, setUnlockResultId] = useState<number | null>(null);
+  const [unlockedResultIds, setUnlockedResultIds] = useState<Set<number>>(() => new Set());
 
   const resultsQuery = useGetPortalResults({
     query: {
       queryKey: getGetPortalResultsQueryKey(),
-      enabled: Boolean(portalAuth.token) && resultsUnlocked,
+      enabled: Boolean(portalAuth.token),
       retry: false,
     },
   });
 
-  const resultsLocked =
-    resultsUnlocked &&
-    resultsQuery.isError &&
-    resultsQuery.error instanceof ApiError &&
-    resultsQuery.error.status === 403;
+  const unlockOpen = unlockResultId != null;
 
-  useEffect(() => {
-    if (!resultsLocked) return;
-    clearStoredPortalResultsAccessCodeOnLock();
-    setResultsUnlocked(false);
-  }, [resultsLocked]);
+  async function openUnlockedDocument(result: {
+    id: number;
+    originalFileName: string;
+    fileType: string;
+    category: string;
+  }) {
+    beginPortalResultDownload(result.id);
+    try {
+      const data = await getPortalResultDownloadUrl(result.id);
+      if (!data?.url) {
+        toast({
+          title: "Document unavailable",
+          description: "The authorized file could not be opened.",
+          variant: "destructive",
+        });
+        return;
+      }
+      setViewer({
+        url: data.url,
+        fileType: result.fileType,
+        fileName: result.originalFileName,
+        title: result.originalFileName,
+        meta: resultCategoryLabel(result.category),
+      });
+    } catch {
+      toast({
+        title: "Unable to open document",
+        description: "Authorization failed or the file is missing. Try unlocking again.",
+        variant: "destructive",
+      });
+    } finally {
+      endPortalResultDownload();
+    }
+  }
+
+  function openUnlockFor(resultId: number) {
+    setUnlockResultId(resultId);
+    setUnlockError(null);
+    setRequestMessage(null);
+  }
+
+  function isResultUnlocked(resultId: number): boolean {
+    return unlockedResultIds.has(resultId) || Boolean(getStoredPortalResultAccessCode(resultId));
+  }
 
   async function handleUnlock(accessCode: string) {
-    setUnlockBusy(true);
-    setUnlockError(null);
-    const result = await unlockPortalResults(accessCode);
-    setUnlockBusy(false);
-    if (!result.ok) {
-      setUnlockError(result.error ?? "Invalid access code.");
+    if (unlockResultId == null) {
+      setUnlockError("Select a document to unlock.");
       return;
     }
-    setResultsUnlocked(true);
-    void resultsQuery.refetch();
+    setUnlockBusy(true);
+    setUnlockError(null);
+    const outcome = await unlockPortalResult(unlockResultId, accessCode);
+    setUnlockBusy(false);
+    if (!outcome.ok) {
+      setUnlockError(outcome.error ?? "Invalid access code.");
+      return;
+    }
+    const target = (resultsQuery.data ?? []).find((row) => row.id === unlockResultId);
+    setUnlockedResultIds((prev) => new Set(prev).add(unlockResultId));
+    setUnlockResultId(null);
+    if (target) void openUnlockedDocument(target);
   }
 
   function handleCloseUnlock() {
-    setLocation("/portal/dashboard");
+    setUnlockResultId(null);
   }
 
   async function handleRequestAccessCode() {
@@ -123,6 +165,16 @@ export default function PortalResultsPage() {
     });
   }, [category, resultsQuery.data, searchQuery]);
 
+  const unlockDocumentTitle =
+    unlockResultId != null
+      ? (() => {
+          const row = (resultsQuery.data ?? []).find((r) => r.id === unlockResultId);
+          return row
+            ? `${resultCategoryLabel(row.category)} · ${row.originalFileName}`
+            : null;
+        })()
+      : null;
+
   if (!portalAuth.patient || !portalAuth.token) {
     return <Redirect to="/login" />;
   }
@@ -130,24 +182,35 @@ export default function PortalResultsPage() {
   return (
     <PatientLayout title="RESULTS">
       <PortalResultsUnlockDialog
-        open={!resultsUnlocked || resultsLocked}
+        open={unlockOpen}
         busy={unlockBusy}
         error={unlockError}
         requestBusy={requestBusy}
         requestMessage={requestMessage}
-        onSubmit={handleUnlock}
+        documentTitle={unlockDocumentTitle}
+        onSubmit={(code) => void handleUnlock(code)}
         onClose={handleCloseUnlock}
         onRequestAccessCode={() => void handleRequestAccessCode()}
       />
-      {viewer && <ResultFileViewer viewer={viewer} onClose={() => setViewer(null)} />}
+      {viewer ? (
+        <ResultFileViewer
+          viewer={viewer}
+          onClose={() => setViewer(null)}
+          onBackToResults={() => setViewer(null)}
+        />
+      ) : null}
 
       <div className="mx-auto max-w-4xl space-y-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h2 className="text-xl font-bold text-[#17221D]">My diagnostic results</h2>
-            <p className="text-sm text-[#64706A]">Released results from ACE Medical Center Cebu</p>
+            <p className="text-sm text-[#64706A]">
+              Released results from ACE Medical Center Cebu. Each document has its own access code.
+            </p>
           </div>
-          <DepartmentFilter value={category} onChange={setCategory} />
+          <div className="flex flex-wrap items-center gap-2">
+            <DepartmentFilter value={category} onChange={setCategory} />
+          </div>
         </div>
 
         {resultsQuery.isLoading ? (
@@ -186,6 +249,7 @@ export default function PortalResultsPage() {
           <div className="space-y-3">
             {resultList.map((result) => {
               const sizeLabel = formatFileSize(result.fileSizeBytes);
+              const unlocked = isResultUnlocked(result.id);
               return (
                 <article
                   key={result.id}
@@ -221,20 +285,33 @@ export default function PortalResultsPage() {
                       </div>
                     </div>
                     <div className="flex w-full shrink-0 gap-2 sm:w-auto">
-                      <ResultViewButton
-                        result={result}
-                        onView={setViewer}
-                        className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[#2F7D4A] px-3 py-2 text-[12px] font-semibold text-white sm:flex-none disabled:opacity-70"
-                      >
-                        <Eye className="h-4 w-4" />
-                        View
-                      </ResultViewButton>
-                      <ResultDownloadButton
-                        result={result}
-                        className="inline-flex items-center justify-center rounded-md border border-[#DDE5E0] px-3 py-2 text-[#17221D] disabled:opacity-70"
-                      >
-                        <Download className="h-4 w-4" />
-                      </ResultDownloadButton>
+                      {!unlocked ? (
+                        <button
+                          type="button"
+                          onClick={() => openUnlockFor(result.id)}
+                          className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[#FBECEF] px-3 py-2 text-[12px] font-semibold text-[#A20F2F] sm:flex-none"
+                        >
+                          <Lock className="h-4 w-4" />
+                          Locked — Unlock to view
+                        </button>
+                      ) : (
+                        <>
+                          <ResultViewButton
+                            result={result}
+                            onView={setViewer}
+                            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[#2F7D4A] px-3 py-2 text-[12px] font-semibold text-white sm:flex-none disabled:opacity-70"
+                          >
+                            <Eye className="h-4 w-4" />
+                            View
+                          </ResultViewButton>
+                          <ResultDownloadButton
+                            result={result}
+                            className="inline-flex items-center justify-center rounded-md border border-[#DDE5E0] px-3 py-2 text-[#17221D] disabled:opacity-70"
+                          >
+                            <Download className="h-4 w-4" />
+                          </ResultDownloadButton>
+                        </>
+                      )}
                     </div>
                   </div>
                 </article>

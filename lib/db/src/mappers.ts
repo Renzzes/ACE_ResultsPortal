@@ -7,6 +7,7 @@ import type {
   Patient,
   PatientPhysician,
   ReleaseOption,
+  ResultAccessCodeEmailStatus,
   ResultCategory,
   ResultRow,
   ResultStatus,
@@ -56,7 +57,7 @@ export function mapPatient(row: Row): Patient {
     dateOfBirth: isoDateOnly(row.date_of_birth),
     mobileNumber: asString(row.mobile_number),
     email: asString(row.email),
-    accessCodeHash: asRequiredString(row.access_code_hash),
+    accessCodeHash: asString(row.access_code_hash),
     createdById: asNumber(row.created_by_id),
     portalUserId: asNumber(row.portal_user_id),
     accessCodeRequestedAt: asDate(row.access_code_requested_at),
@@ -86,6 +87,7 @@ export function mapAssignedPhysician(row: Row): AssignedPhysician {
 }
 
 export function mapResult(row: Row): ResultRow {
+  const emailStatus = asString(row.access_code_email_status);
   return {
     id: asRequiredNumber(row.id),
     patientId: asRequiredNumber(row.patient_id),
@@ -105,6 +107,14 @@ export function mapResult(row: Row): ResultRow {
     uploadedAt: asRequiredDate(row.uploaded_at),
     createdAt: asRequiredDate(row.created_at),
     updatedAt: asRequiredDate(row.updated_at),
+    accessCodeHash: asString(row.access_code_hash),
+    accessCodeEncrypted: asString(row.access_code_encrypted),
+    accessCodeIssuedAt: asDate(row.access_code_issued_at),
+    accessCodeEmailedAt: asDate(row.access_code_emailed_at),
+    accessCodeEmailStatus:
+      emailStatus === "none" || emailStatus === "accepted" || emailStatus === "failed"
+        ? (emailStatus as ResultAccessCodeEmailStatus)
+        : null,
   };
 }
 

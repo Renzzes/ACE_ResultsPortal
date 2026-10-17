@@ -74,6 +74,18 @@ export async function issueAccessCodeAndEmail(input: {
   }
 
   const expectedHash = input.patient.accessCodeHash;
+  if (!expectedHash) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        "No patient-level access code is active. Issue a document access code for the specific result instead.",
+      credentialIssued: false,
+      emailAccepted: false,
+      hashUnchanged: true,
+    };
+  }
+
   const accessCode = generateAccessCode();
   const accessCodeHash = await hashAccessCode(accessCode);
 

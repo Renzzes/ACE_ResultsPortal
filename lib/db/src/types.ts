@@ -23,6 +23,8 @@ export type ResultStatus = "pending" | "released" | "archived";
 
 export type FileType = "pdf" | "jpeg" | "png";
 
+export type ResultAccessCodeEmailStatus = "none" | "accepted" | "failed";
+
 export type AuditAction =
   | "login"
   | "logout"
@@ -83,7 +85,8 @@ export interface Patient {
   dateOfBirth: string;
   mobileNumber: string | null;
   email: string | null;
-  accessCodeHash: string;
+  /** Patient-level results unlock is retired; prefer per-result credentials. */
+  accessCodeHash: string | null;
   createdById: number | null;
   /** Linked dbo.users.id when role='patient'. Null until portal registration. */
   portalUserId: number | null;
@@ -118,6 +121,13 @@ export interface ResultRow {
   uploadedAt: Date;
   createdAt: Date;
   updatedAt: Date;
+  /** Bcrypt hash of the document-specific access code; null until issued. */
+  accessCodeHash: string | null;
+  /** AES-GCM envelope of the current plaintext code for print / email-retry. */
+  accessCodeEncrypted: string | null;
+  accessCodeIssuedAt: Date | null;
+  accessCodeEmailedAt: Date | null;
+  accessCodeEmailStatus: ResultAccessCodeEmailStatus | null;
 }
 
 export type PrescriptionStatus = "active" | "completed" | "cancelled";

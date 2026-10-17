@@ -127,6 +127,7 @@ export default function UploadResultPage() {
   const [scheduledDate, setScheduledDate] = useState("");
   const [remarks, setRemarks] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [recipientEmail, setRecipientEmail] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -206,6 +207,10 @@ export default function UploadResultPage() {
       enabled: !!selectedPatient?.id,
     },
   });
+
+  useEffect(() => {
+    setRecipientEmail(selectedPatientDetails?.email?.trim() ?? "");
+  }, [selectedPatientDetails?.id, selectedPatientDetails?.email]);
 
   useEffect(() => {
     if (prefillPatient && prefilledPatientId != null && prefillPatient.id === prefilledPatientId && !selectedPatient) {
@@ -326,11 +331,21 @@ export default function UploadResultPage() {
       toast({ title: "Please select a result category", variant: "destructive" });
       return;
     }
+    const email = recipientEmail.trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      toast({
+        title: "Patient Email Address required",
+        description: "Enter a valid email to send the document access code.",
+        variant: "destructive",
+      });
+      return;
+    }
 
     setUploading(true);
     const formData = new FormData();
     formData.append("patientId", String(selectedPatient.id));
     formData.append("releaseOption", releaseOption);
+    formData.append("recipientEmail", email);
     if (needsCategory) formData.append("category", category);
     if (releaseOption === "scheduled" && scheduledDate) formData.append("scheduledReleaseDate", scheduledDate);
     const remarksPayload = composedRemarks();
@@ -339,11 +354,21 @@ export default function UploadResultPage() {
     formData.append("file", file);
 
     try {
-      await customFetch("/api/results/upload", {
+      const uploaded = await customFetch<{
+        accessCodeEmail?: { accepted?: boolean; error?: string | null };
+      }>("/api/results/upload", {
         method: "POST",
         body: formData,
       });
-      toast({ title: "Result uploaded successfully" });
+      if (uploaded?.accessCodeEmail && uploaded.accessCodeEmail.accepted === false) {
+        toast({
+          title: "Document uploaded; access-code email failed",
+          description: uploaded.accessCodeEmail.error ?? "You can resend the code from the patient record.",
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Result uploaded and access code emailed" });
+      }
       setLocation(`/patients/${selectedPatient.id}`);
     } catch (err) {
       toast({
@@ -741,6 +766,23 @@ export default function UploadResultPage() {
                       />
                       <p className="text-[10px] st-muted">Not available</p>
                     </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="recipient-email" className="text-xs font-semibold text-[hsl(var(--st-muted))]">
+                      Patient Email Address <span className="text-[hsl(var(--st-maroon))]">*</span>
+                    </Label>
+                    <Input
+                      id="recipient-email"
+                      type="email"
+                      autoComplete="email"
+                      className="h-10 rounded-xl"
+                      value={recipientEmail}
+                      onChange={(e) => setRecipientEmail(e.target.value)}
+                      placeholder="patient@example.com"
+                      required
+                    />
+                    <p className="text-[10px] st-muted">Email for this document&apos;s access code.</p>
                   </div>
 
                   <div className="space-y-1.5">

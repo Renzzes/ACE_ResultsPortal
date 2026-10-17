@@ -194,9 +194,16 @@ export function StaffResultPreviewPane({
   if (!result) return null;
 
   const handlePrint = () => {
+    // Prefer print-ready derivative with document access-code header on every page.
+    const printUrl = `/api/results/${result.id}/print-ready`;
+    const win = window.open(printUrl, "_blank");
+    if (win) {
+      win.focus();
+      return;
+    }
     if (!previewUrl) return;
-    const win = window.open(previewUrl, "_blank");
-    if (win) win.focus();
+    const fallback = window.open(previewUrl, "_blank");
+    if (fallback) fallback.focus();
   };
 
   const handleDownload = async () => {

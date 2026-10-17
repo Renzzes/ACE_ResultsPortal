@@ -555,6 +555,11 @@ export interface PortalResult {
   uploadedAt: string;
   /** @nullable */
   dateReleased: string | null;
+  /**
+   * True when the request did not include a valid access code.
+   * Listing is allowed while locked; document content is not.
+   */
+  locked?: boolean;
 }
 
 export interface PortalOverviewPatient {

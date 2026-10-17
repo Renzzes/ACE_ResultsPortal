@@ -60,3 +60,6 @@ Thumbs.db
 artifacts/api-server/uploads/
 artifacts/api-server/data/
 var/result-files/
+
+# Local test evidence — keep out of source commits
+artifacts/test-output/

@@ -6,7 +6,6 @@ import {
   getGetPatientQueryKey,
   useListPatientResultsStaff,
   getListPatientResultsStaffQueryKey,
-  useRegenerateAccessCode,
   useReleaseResult,
   useGetResultDownloadUrl,
   getGetResultDownloadUrlQueryKey,
@@ -14,21 +13,12 @@ import {
   useUpdatePatient,
   getListArchivedResultsQueryKey,
   getGetDashboardStatsQueryKey,
+  customFetch,
 } from "@workspace/api-client-react";
 import { StaffLayout } from "@/components/layout/staff-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import {
   Dialog,
   DialogContent,
@@ -46,7 +36,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
-import { copyText } from "@/lib/copy-text";
 import {
   canEditPatientsUi,
   canRegenerateAccessCodeUi,
@@ -63,12 +52,10 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardList,
-  Copy,
   Eye,
   FileText,
   Filter,
   History,
-  KeyRound,
   MessageSquare,
   MoreVertical,
   Pencil,
@@ -220,13 +207,12 @@ export default function PatientDetailPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { auth } = useAuth();
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
-  const [revealedCode, setRevealedCode] = useState<string | null>(null);
-  const [regenOpen, setRegenOpen] = useState(false);
+  const [docRegen, setDocRegen] = useState<{ id: number; title: string; category: string } | null>(null);
+  const [docRegenEmail, setDocRegenEmail] = useState("");
+  const [docRegenPending, setDocRegenPending] = useState(false);
+  const [docRegenError, setDocRegenError] = useState<string | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [viewCodeOpen, setViewCodeOpen] = useState(false);
   const [preview, setPreview] = useState<StaffPreviewResult | null>(null);
   const [tab, setTab] = useState<DetailTab>("overview");
   const [resultSearch, setResultSearch] = useState("");
@@ -257,7 +243,6 @@ export default function PatientDetailPage() {
     query: { queryKey: getListPatientResultsStaffQueryKey(patientId), enabled: !!patientId },
   });
 
-  const regenerate = useRegenerateAccessCode();
   const releaseResult = useReleaseResult();
   const archiveResult = useUpdateResult();
   const updatePatient = useUpdatePatient();
@@ -315,37 +300,33 @@ export default function PatientDetailPage() {
     });
   }, [resultList, debouncedResultSearch, statusFilter]);
 
-  const copyCode = async (code: string) => {
-    setCopyError(null);
-    const ok = await copyText(code);
-    if (!ok) {
-      setCopyError("Unable to copy automatically. Please copy the access code manually.");
+  async function handleDocumentRegen() {
+    if (!docRegen) return;
+    const email = (patient?.email?.trim() || docRegenEmail).trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setDocRegenError("Enter a valid recipient email.");
       return;
     }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-
-  const handleRegenerate = () => {
-    regenerate.mutate(
-      { id: patientId },
-      {
-        onSuccess: (data) => {
-          if (data.accessCode) setRevealedCode(data.accessCode);
-          setRegenOpen(false);
-          toast({
-            title: "Access code regenerated",
-            description: "Save this access code. It will only be shown once.",
-          });
-        },
-        onError: () =>
-          toast({
-            title: "You don't have permission to perform this action.",
-            variant: "destructive",
-          }),
-      },
-    );
-  };
+    setDocRegenPending(true);
+    setDocRegenError(null);
+    try {
+      await customFetch(`/api/results/${docRegen.id}/regenerate-access-code`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      toast({
+        title: "Document access code regenerated",
+        description: "The new code was emailed to the patient. Other documents are unchanged.",
+      });
+      setDocRegen(null);
+      void refetchResults();
+    } catch (err) {
+      setDocRegenError(err instanceof Error ? err.message : "Unable to regenerate access code.");
+    } finally {
+      setDocRegenPending(false);
+    }
+  }
 
   const handleRelease = (resultId: number) => {
     releaseResult.mutate(
@@ -413,20 +394,6 @@ export default function PatientDetailPage() {
     window.print();
   };
 
-  const openViewAccessCode = () => {
-    const code = revealedCode ?? (patient as { accessCode?: string | null } | undefined)?.accessCode;
-    if (code) {
-      setViewCodeOpen(true);
-      return;
-    }
-    toast({
-      title: "Access code is on file (hidden)",
-      description: canRegen
-        ? "Regenerate the access code to view a new plaintext code. The stored hash is never shown."
-        : "The stored access code cannot be displayed. Ask an authorized staff member to regenerate it if needed.",
-    });
-  };
-
   if (isLoading) {
     return (
       <StaffLayout showSearch={false}>
@@ -466,7 +433,6 @@ export default function PatientDetailPage() {
   const age = ageFromDob(patient.dateOfBirth);
   const fullName = `${patient.lastName}, ${patient.firstName}${patient.middleName ? ` ${patient.middleName}` : ""}`;
   const portalActive = Boolean((patient as { portalActive?: boolean }).portalActive);
-  const visibleCode = revealedCode ?? (patient as { accessCode?: string | null }).accessCode ?? null;
 
   const totalPages = Math.max(1, Math.ceil(filteredResults.length / pageSize) || 1);
   const safePage = Math.min(page, totalPages);
@@ -568,17 +534,6 @@ export default function PatientDetailPage() {
                 Upload Result
               </Button>
             ) : null}
-            {canRegen ? (
-              <Button
-                type="button"
-                variant="outline"
-                className="h-10 rounded-xl border-[hsl(var(--st-border))] bg-white px-4 shadow-sm"
-                onClick={() => setRegenOpen(true)}
-              >
-                <RefreshCw className="mr-2 h-4 w-4" />
-                Regenerate Access Code
-              </Button>
-            ) : null}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -595,10 +550,6 @@ export default function PatientDetailPage() {
                 <DropdownMenuItem onClick={printPatientInfo}>
                   <Printer className="mr-2 h-4 w-4" />
                   Print patient info
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={openViewAccessCode}>
-                  <KeyRound className="mr-2 h-4 w-4" />
-                  View access code
                 </DropdownMenuItem>
                 {canEditInfo ? (
                   <DropdownMenuItem onClick={() => setEditOpen(true)}>
@@ -705,57 +656,16 @@ export default function PatientDetailPage() {
                   </div>
                   <dl className="flex-1">
                     <InfoRow
-                      label="Access Code"
+                      label="Document codes"
                       value={
-                        <span className="inline-flex items-center gap-1.5">
-                          {visibleCode ? (
-                            <>
-                              <span className="font-mono text-xs">{visibleCode}</span>
-                              <button
-                                type="button"
-                                className="rounded p-0.5 hover:bg-[hsl(var(--st-cream))]"
-                                aria-label="Copy access code"
-                                onClick={() => void copyCode(visibleCode)}
-                              >
-                                {copied ? <Check className="h-3.5 w-3.5 text-[hsl(var(--st-green))]" /> : <Copy className="h-3.5 w-3.5" />}
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <span className="text-xs font-medium text-[hsl(var(--st-muted))]">On file (hidden)</span>
-                              <button
-                                type="button"
-                                className="rounded p-0.5 hover:bg-[hsl(var(--st-cream))]"
-                                aria-label="Access code info"
-                                onClick={openViewAccessCode}
-                              >
-                                <Copy className="h-3.5 w-3.5 text-[hsl(var(--st-muted))]" />
-                              </button>
-                            </>
-                          )}
+                        <span className="text-xs font-medium text-[hsl(var(--st-muted))]">
+                          Issued per result on upload or regenerate
                         </span>
                       }
                     />
                     <InfoRow label="Created" value={formatDateTime(patient.createdAt)} />
                     <InfoRow label="Last Updated" value={formatDateTime(patient.updatedAt)} />
                   </dl>
-                  {copyError ? <p className="mt-2 text-xs text-red-700">{copyError}</p> : null}
-                  {visibleCode ? (
-                    <p className="mt-2 text-[11px] text-[hsl(var(--st-maroon))]">
-                      Save this access code. It will only be shown once.
-                    </p>
-                  ) : null}
-                  {canRegen ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="mt-4 h-9 w-full rounded-xl border-[hsl(var(--st-border))] bg-white"
-                      onClick={() => setRegenOpen(true)}
-                    >
-                      <RefreshCw className="mr-2 h-3.5 w-3.5" />
-                      Regenerate Access Code
-                    </Button>
-                  ) : null}
                 </section>
 
                 {/* Assigned Physician — derived from result file assignments */}
@@ -978,6 +888,22 @@ export default function PatientDetailPage() {
                                     <DropdownMenuContent align="end" className="staff-shell">
                                       <DropdownMenuItem onClick={() => openPreview(r)}>Open preview</DropdownMenuItem>
                                       <DownloadMenuItem resultId={r.id} />
+                                      {canRegen ? (
+                                        <DropdownMenuItem
+                                          onClick={() => {
+                                            setDocRegen({
+                                              id: r.id,
+                                              title: r.originalFileName,
+                                              category: r.category,
+                                            });
+                                            setDocRegenEmail(patient.email?.trim() ?? "");
+                                            setDocRegenError(null);
+                                          }}
+                                        >
+                                          <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                                          Regenerate Access Code
+                                        </DropdownMenuItem>
+                                      ) : null}
                                       {canMutateResults && r.status === "pending" ? (
                                         <DropdownMenuItem onClick={() => handleRelease(r.id)}>
                                           Release
@@ -1046,6 +972,7 @@ export default function PatientDetailPage() {
             id: patientId,
             patientHisId: patient.patientHisId,
             name: fullName,
+            email: patient.email,
           }}
           onUploaded={() => void refetchResults()}
         />
@@ -1137,46 +1064,61 @@ export default function PatientDetailPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={viewCodeOpen} onOpenChange={setViewCodeOpen}>
-        <DialogContent className="staff-shell sm:max-w-md">
+      <Dialog
+        open={docRegen != null}
+        onOpenChange={(open) => {
+          if (!open && !docRegenPending) {
+            setDocRegen(null);
+            setDocRegenError(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Access Code</DialogTitle>
+            <DialogTitle>Regenerate Document Access Code</DialogTitle>
             <DialogDescription>
-              This is a diagnostic results access code, not a Patient Portal password.
+              {docRegen
+                ? `Document: ${docRegen.title}. The previous code for this document only will stop working.`
+                : null}
             </DialogDescription>
           </DialogHeader>
-          {visibleCode ? (
-            <div className="space-y-3 text-center">
-              <p className="font-mono text-2xl font-bold tracking-widest text-[hsl(var(--st-text))]">{visibleCode}</p>
-              <Button type="button" variant="outline" onClick={() => void copyCode(visibleCode)}>
-                {copied ? <Check className="mr-2 h-4 w-4" /> : <Copy className="mr-2 h-4 w-4" />}
-                {copied ? "Copied" : "Copy Access Code"}
-              </Button>
-              {copyError ? <p className="text-sm text-red-700">{copyError}</p> : null}
-            </div>
-          ) : (
-            <p className="text-sm st-muted">No plaintext access code is available to display.</p>
-          )}
+          <div className="space-y-2">
+            <Label htmlFor="doc-regen-email">Recipient email</Label>
+            {patient.email?.trim() ? (
+              <p className="rounded-lg border border-[hsl(var(--st-border))] bg-[hsl(var(--st-cream))] px-3 py-2 text-sm">
+                {patient.email.trim()}
+              </p>
+            ) : (
+              <Input
+                id="doc-regen-email"
+                type="email"
+                value={docRegenEmail}
+                onChange={(e) => setDocRegenEmail(e.target.value)}
+                placeholder="patient@example.com"
+                required
+              />
+            )}
+            {docRegenError ? <p className="text-sm text-red-700">{docRegenError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={docRegenPending}
+              onClick={() => setDocRegen(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={docRegenPending}
+              onClick={() => void handleDocumentRegen()}
+            >
+              {docRegenPending ? "Sending…" : "Regenerate & Send"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      <AlertDialog open={regenOpen} onOpenChange={setRegenOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Regenerate access code?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Regenerating the access code will invalidate the patient&apos;s previous access code. The new code will
-              be shown once — save it immediately.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleRegenerate} disabled={regenerate.isPending}>
-              {regenerate.isPending ? "Regenerating…" : "Regenerate"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </StaffLayout>
   );
 }

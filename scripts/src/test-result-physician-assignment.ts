@@ -40,6 +40,11 @@ function fakeResult(overrides: Partial<ResultRow> = {}): ResultRow {
     uploadedAt: new Date(),
     createdAt: new Date(),
     updatedAt: new Date(),
+    accessCodeHash: null,
+    accessCodeEncrypted: null,
+    accessCodeIssuedAt: null,
+    accessCodeEmailedAt: null,
+    accessCodeEmailStatus: null,
     ...overrides,
   };
 }
@@ -61,6 +66,8 @@ function fakeUser(overrides: Partial<User> = {}): User {
     failedLoginAttempts: 0,
     lockedUntil: null,
     lastLoginAt: null,
+    mustChangePassword: false,
+    passwordExpiresAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -191,7 +198,15 @@ test("NOTIFY — result_assigned content is generic (no PHI/secrets)", () => {
     { type: "result_assigned", entityType: "result", entityId: 123 },
     "physician",
   );
-  assert.equal(href, "/physician/results");
+  // Contract: physician assignment notifications deep-link to the result when entityId is present.
+  assert.equal(href, "/physician/results?resultId=123");
+  assert.equal(
+    notificationHref(
+      { type: "result_assigned", entityType: "result", entityId: null },
+      "physician",
+    ),
+    "/physician/results",
+  );
 });
 
 test("NOTIFY body text is generic reference copy", () => {

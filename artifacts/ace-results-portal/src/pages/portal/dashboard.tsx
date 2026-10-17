@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import {
   getGetPortalOverviewQueryKey,
@@ -7,17 +7,18 @@ import {
   useGetPortalOverview,
   useGetPortalResults,
   ApiError,
-  type PortalResult,
 } from "@workspace/api-client-react";
 import { PatientLayout } from "@/components/layout/patient-layout";
 import { PatientProfileAvatar } from "@/components/portal/patient-profile-avatar";
 import { PatientAccountDialog } from "@/components/portal/patient-account-dialog";
 import { ContactSupportDialog } from "@/components/portal/contact-support-dialog";
+import { PortalResultsUnlockDialog } from "@/components/portal/results-unlock-dialog";
 import {
+  ResultDocumentLoadingOverlay,
   ResultFileViewer,
-  ResultViewButton,
   type ResultViewerState,
 } from "@/components/portal/result-preview";
+import { getPortalResultDownloadUrl } from "@workspace/api-client-react";
 import {
   Dialog,
   DialogContent,
@@ -27,8 +28,11 @@ import {
 } from "@/components/ui/dialog";
 import { publicAsset } from "@/components/layout/auth-split-layout";
 import {
+  beginPortalResultDownload,
   clearStoredPortalResultsAccessCodeOnLock,
-  getStoredPortalResultsAccessCode,
+  endPortalResultDownload,
+  getStoredPortalResultAccessCode,
+  unlockPortalResult,
 } from "@/lib/portal-results-access";
 import { fetchPortalMessageUnreadCount } from "@/lib/comms-api";
 import {
@@ -39,44 +43,26 @@ import {
   portalPhotoKey,
   resultCategoryLabel,
   resultReleasedAt,
-  resultStatusLabel,
   sortPortalResultsByRelease,
 } from "@/lib/patient-identity";
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 import {
   CalendarDays,
-  ChevronLeft,
-  ChevronRight,
   ChevronRight as ChevronRightIcon,
   ExternalLink,
-  Eye,
   FileText,
   Headphones,
   Lock,
   Mail,
   MessageSquare,
-  MoreHorizontal,
   Pencil,
   Phone,
   Users,
+  X,
 } from "lucide-react";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-
-function formatReleaseStamp(iso?: string | null) {
-  if (!iso) return { date: "—", time: "" };
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return { date: "—", time: "" };
-  return {
-    date: d.toLocaleDateString("en-PH", { year: "numeric", month: "short", day: "numeric" }),
-    time: d.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit" }),
-  };
-}
+import type { PortalResult } from "@workspace/api-client-react";
 
 function DocumentHeroIcon() {
   return (
@@ -98,24 +84,30 @@ function DocumentHeroIcon() {
 }
 
 export default function PortalDashboardPage() {
+  const { portalAuth } = useAuth();
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
   const [viewer, setViewer] = useState<ResultViewerState | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [accessHelpOpen, setAccessHelpOpen] = useState(false);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-  const [rowMenuId, setRowMenuId] = useState<number | null>(null);
-  const [resultsUnlocked, setResultsUnlocked] = useState(() =>
-    Boolean(getStoredPortalResultsAccessCode()),
-  );
+  const [unlockOpen, setUnlockOpen] = useState(false);
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [requestBusy, setRequestBusy] = useState(false);
+  const [requestMessage, setRequestMessage] = useState<string | null>(null);
+  const [documentPickerOpen, setDocumentPickerOpen] = useState(false);
+  const [documentOpening, setDocumentOpening] = useState(false);
+  const [unlockResultId, setUnlockResultId] = useState<number | null>(null);
+  const [unlockedResultIds, setUnlockedResultIds] = useState<Set<number>>(() => new Set());
 
   const overviewQuery = useGetPortalOverview({
     query: { queryKey: getGetPortalOverviewQueryKey() },
   });
+  // Catalog is available without an access code; content download still requires unlock.
   const resultsQuery = useGetPortalResults({
     query: {
       queryKey: getGetPortalResultsQueryKey(),
-      enabled: resultsUnlocked,
       retry: false,
     },
   });
@@ -129,6 +121,12 @@ export default function PortalDashboardPage() {
 
   const patient = overviewQuery.data?.patient;
   const doctors = overviewQuery.data?.assignedDoctors ?? [];
+  const doctorsLabel =
+    doctors.length === 0
+      ? "Not yet assigned"
+      : doctors.length === 1
+        ? doctors[0]?.name ?? "Assigned"
+        : `${doctors.length} assigned`;
   const appointments = overviewQuery.data?.appointments;
   const nextAppointment = appointments?.next ?? null;
   const appointmentsUnavailable =
@@ -141,49 +139,178 @@ export default function PortalDashboardPage() {
     () => sortPortalResultsByRelease(resultsQuery.data ?? []),
     [resultsQuery.data],
   );
-  const totalResults = sortedResults.length;
-  const totalPages = Math.max(1, Math.ceil(totalResults / pageSize) || 1);
-  const pageRows = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return sortedResults.slice(start, start + pageSize);
-  }, [sortedResults, page, pageSize]);
+  const latestResult = sortedResults[0] ?? null;
 
-  const latestResult = sortedResults[0];
   const loading = overviewQuery.isLoading;
   const errored = overviewQuery.isError;
   const resultsRejected =
-    resultsUnlocked &&
     resultsQuery.isError &&
     resultsQuery.error instanceof ApiError &&
     resultsQuery.error.status === 403;
-  const resultsLocked = !resultsUnlocked || resultsRejected;
+  const anyLocked = sortedResults.some((r) => r.locked !== false && !unlockedResultIds.has(r.id));
+
+  async function openResultDocument(result: NonNullable<typeof latestResult>) {
+    setDocumentOpening(true);
+    beginPortalResultDownload(result.id);
+    try {
+      const data = await getPortalResultDownloadUrl(result.id);
+      if (!data?.url) {
+        toast({
+          title: "Document unavailable",
+          description: "The authorized file could not be opened. Try again from My Results.",
+          variant: "destructive",
+        });
+        return;
+      }
+      setViewer({
+        url: data.url,
+        fileType: result.fileType,
+        fileName: result.originalFileName,
+        title: result.originalFileName,
+        meta: resultCategoryLabel(result.category),
+      });
+    } catch {
+      toast({
+        title: "Unable to open document",
+        description: "Authorization failed or the file is missing. Try unlocking again.",
+        variant: "destructive",
+      });
+    } finally {
+      endPortalResultDownload();
+      setDocumentOpening(false);
+    }
+  }
 
   useEffect(() => {
     if (!resultsRejected) return;
     clearStoredPortalResultsAccessCodeOnLock();
-    setResultsUnlocked(false);
+    setUnlockedResultIds(new Set());
   }, [resultsRejected]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [pageSize, resultsLocked, totalResults]);
+  const latestResultLabel = latestResult
+    ? formatPortalDate(resultReleasedAt(latestResult))
+    : "Not yet available";
 
-  const doctorsLabel =
-    doctors.length === 0
-      ? "Not yet assigned"
-      : doctors.length === 1
-        ? doctors[0]?.name ?? "Assigned"
-        : `${doctors.length} assigned`;
+  async function handleUnlock(accessCode: string) {
+    if (unlockResultId == null) {
+      setUnlockError("Select a document to unlock.");
+      return;
+    }
+    setUnlockBusy(true);
+    setUnlockError(null);
+    const outcome = await unlockPortalResult(unlockResultId, accessCode);
+    setUnlockBusy(false);
+    if (!outcome.ok) {
+      setUnlockError(outcome.error ?? "Invalid access code.");
+      return;
+    }
+    const target = sortedResults.find((row) => row.id === unlockResultId);
+    setUnlockedResultIds((prev) => new Set(prev).add(unlockResultId));
+    setUnlockOpen(false);
+    setUnlockResultId(null);
+    if (target) void openResultDocument(target);
+  }
 
-  const latestResultLabel = resultsLocked
-    ? "Unlock to view"
-    : latestResult
-      ? formatPortalDate(resultReleasedAt(latestResult))
-      : "Not yet available";
+  async function handleRequestAccessCode() {
+    setRequestBusy(true);
+    setRequestMessage(null);
+    try {
+      const response = await fetch("/api/portal/request-access-code", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${portalAuth.token ?? ""}`,
+        },
+      });
+      const data = (await response.json().catch(() => ({}))) as { error?: string; message?: string };
+      if (!response.ok) {
+        setRequestMessage(data.error ?? "Could not send your request. Try again later.");
+        return;
+      }
+      const message =
+        data.message ??
+        "Your request was sent. Hospital staff will email a new access code when ready.";
+      setRequestMessage(message);
+      toast({ title: "Access code requested", description: message });
+    } catch {
+      setRequestMessage("Could not send your request. Try again later.");
+    } finally {
+      setRequestBusy(false);
+    }
+  }
+
+  function handleUnlockAndView() {
+    if (resultsQuery.isLoading || documentOpening) return;
+    if (sortedResults.length === 0) {
+      toast({
+        title: "No released results yet",
+        description: "When a diagnostic report is released, you can unlock and view it here.",
+      });
+      return;
+    }
+    setDocumentPickerOpen(true);
+  }
+
+  function handlePickDocument(resultId: number) {
+    const target = sortedResults.find((row) => row.id === resultId);
+    if (!target) return;
+    setDocumentPickerOpen(false);
+    if (getStoredPortalResultAccessCode(resultId) || unlockedResultIds.has(resultId)) {
+      void openResultDocument(target);
+      return;
+    }
+    setUnlockResultId(resultId);
+    setUnlockError(null);
+    setRequestMessage(null);
+    setUnlockOpen(true);
+  }
 
   return (
     <PatientLayout title="DASHBOARD" fill>
-      {viewer ? <ResultFileViewer viewer={viewer} onClose={() => setViewer(null)} /> : null}
+      {viewer ? (
+        <ResultFileViewer
+          viewer={viewer}
+          onClose={() => setViewer(null)}
+          onBackToResults={() => {
+            setViewer(null);
+            setLocation("/portal/results");
+          }}
+        />
+      ) : null}
+      {documentOpening ? <ResultDocumentLoadingOverlay /> : null}
+
+      <PortalResultsUnlockDialog
+        open={unlockOpen}
+        busy={unlockBusy}
+        error={unlockError}
+        requestBusy={requestBusy}
+        requestMessage={requestMessage}
+        documentTitle={
+          unlockResultId != null
+            ? (() => {
+                const row = sortedResults.find((r) => r.id === unlockResultId);
+                return row
+                  ? `${resultCategoryLabel(row.category)} · ${row.originalFileName}`
+                  : null;
+              })()
+            : null
+        }
+        onSubmit={(code) => void handleUnlock(code)}
+        onClose={() => {
+          setUnlockOpen(false);
+          setUnlockResultId(null);
+        }}
+        onRequestAccessCode={() => void handleRequestAccessCode()}
+      />
+
+      <PortalDocumentPickerDialog
+        open={documentPickerOpen}
+        results={sortedResults}
+        locked={anyLocked}
+        busy={documentOpening}
+        onPick={handlePickDocument}
+        onClose={() => setDocumentPickerOpen(false)}
+      />
 
       <div className="flex h-auto min-h-0 flex-col gap-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] xl:h-full xl:overflow-hidden xl:pb-0">
         {/* Patient identity card */}
@@ -247,7 +374,7 @@ export default function PortalDashboardPage() {
 
               <div className="hidden h-24 w-px bg-[#DFE9E4] xl:block" aria-hidden />
 
-              <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-3 xl:max-w-xl">
+              <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-3 xl:max-w-2xl">
                 <MetaRow
                   icon={CalendarDays}
                   label="Date of Birth"
@@ -272,177 +399,111 @@ export default function PortalDashboardPage() {
 
         {/* Main workspace */}
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,0.62fr)_minmax(0,0.38fr)] xl:overflow-hidden">
-          {/* Left column */}
-          <div className="flex min-h-0 flex-col gap-3 xl:overflow-hidden">
-            {/* Hero */}
-            <section className="relative flex-shrink-0 overflow-hidden rounded-2xl border border-[#DFE9E4] bg-gradient-to-r from-white via-[#F8FCF9] to-[#EAF7F0] shadow-[0_4px_16px_rgb(21_61_43_/_0.05)]">
-              <div className="relative z-10 flex min-h-[10.5rem] flex-col justify-center gap-4 px-5 py-5 pb-28 sm:min-h-[11.5rem] sm:px-6 sm:py-6 sm:pb-6 sm:pr-[38%] md:min-h-[12.5rem] md:pr-[40%]">
-                <div className="flex min-w-0 items-start gap-3 sm:gap-4">
-                  <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-full bg-[#E4F5EC] sm:h-[4.75rem] sm:w-[4.75rem]">
-                    <DocumentHeroIcon />
-                  </div>
-                  <div className="min-w-0 pt-0.5">
-                    <h2 className="text-[1.35rem] font-bold leading-[1.15] tracking-tight text-[#101D3A] sm:text-[1.7rem]">
-                      Your Diagnostic Results
-                    </h2>
-                    <p className="mt-2 max-w-[22rem] text-[13px] leading-relaxed text-[#687A93] sm:text-[14px]">
-                      View your laboratory, radiology, and other diagnostic reports released by ACE
-                      Medical Center.
-                    </p>
-                    <Link
-                      href="/portal/results"
-                      className="mt-4 inline-flex h-11 items-center gap-2 rounded-xl bg-[#07864B] px-4 text-sm font-semibold text-white no-underline shadow-[0_6px_16px_rgb(7_134_75_/_0.28)] transition hover:bg-[#075C3B] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#07864B]"
-                    >
-                      <FileText className="h-4 w-4" strokeWidth={2} />
-                      View My Results
-                      <ChevronRightIcon className="h-4 w-4" />
-                    </Link>
-                  </div>
-                </div>
-              </div>
-              <img
-                src={publicAsset("LEAF_RESUTL_PATIENT_PORTAL1.png")}
-                alt=""
-                aria-hidden
-                className="pointer-events-none absolute bottom-0 right-0 h-[9.5rem] w-auto max-w-[55%] object-contain object-right-bottom opacity-90 sm:h-[12.5rem] sm:max-w-[46%] sm:opacity-95 md:h-[14rem]"
-              />
-            </section>
-
-            {/* Recent Results */}
-            <section className="doc-card flex min-h-[16rem] flex-1 flex-col overflow-hidden rounded-2xl border border-[#DFE9E4] bg-white shadow-[0_4px_16px_rgb(21_61_43_/_0.05)] xl:min-h-0">
-              <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-[#DFE9E4] px-4 py-3 sm:px-5">
-                <div className="flex items-center gap-2">
-                  <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[#E4F5EC] text-[#07864B]">
-                    <FileText className="h-4 w-4" />
-                  </span>
-                  <h3 className="text-[15px] font-bold text-[#101D3A]">Recent Results</h3>
-                </div>
-                <Link
-                  href="/portal/results"
-                  className="inline-flex items-center gap-1 text-[13px] font-semibold text-[#07864B] no-underline hover:underline"
+          {/* Left column — diagnostic hero; Available Documents nests inside when present */}
+          <div className="flex min-h-0 flex-col xl:overflow-hidden">
+            <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[#DFE9E4] bg-gradient-to-r from-white via-[#F8FCF9] to-[#EAF7F0] shadow-[0_4px_16px_rgb(21_61_43_/_0.05)]">
+              <div className="relative flex-shrink-0 overflow-hidden">
+                <div
+                  className={`relative z-10 flex flex-col justify-center gap-4 px-5 py-5 sm:px-6 sm:py-6 sm:pr-[38%] md:pr-[40%] ${
+                    sortedResults.length > 0
+                      ? "min-h-[10.5rem] pb-6"
+                      : "min-h-[11rem] pb-28 sm:min-h-[12rem] sm:pb-6"
+                  }`}
                 >
-                  View all
-                  <ChevronRight className="h-4 w-4" />
-                </Link>
+                  <div className="flex min-w-0 items-start gap-3 sm:gap-4">
+                    <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-full bg-[#E4F5EC] sm:h-[4.75rem] sm:w-[4.75rem]">
+                      <DocumentHeroIcon />
+                    </div>
+                    <div className="min-w-0 pt-0.5">
+                      <h2 className="text-[1.35rem] font-bold leading-[1.15] tracking-tight text-[#101D3A] sm:text-[1.7rem]">
+                        Your Diagnostic Results
+                      </h2>
+                      <p className="mt-2 max-w-[24rem] text-[13px] leading-relaxed text-[#687A93] sm:text-[14px]">
+                        View your laboratory, radiology, and other diagnostic reports released by ACE
+                        Medical Center. An access code is required to unlock your documents.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => handleUnlockAndView()}
+                        disabled={documentOpening || unlockBusy}
+                        className="mt-4 inline-flex h-11 items-center gap-2 rounded-xl bg-[#07864B] px-4 text-sm font-semibold text-white shadow-[0_6px_16px_rgb(7_134_75_/_0.28)] transition hover:bg-[#075C3B] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#07864B] disabled:opacity-70"
+                      >
+                        <Lock className="h-4 w-4" strokeWidth={2} />
+                        Unlock &amp; View Results
+                        <ChevronRightIcon className="h-4 w-4" />
+                      </button>
+                      <p className="mt-3 text-[12px] text-[#687A93]">
+                        No access code? Contact the hospital staff or check your reference slip.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <img
+                  src={publicAsset("LEAF_RESUTL_PATIENT_PORTAL1.png")}
+                  alt=""
+                  aria-hidden
+                  className={`pointer-events-none absolute bottom-0 right-0 w-auto object-contain object-right-bottom opacity-90 sm:opacity-95 ${
+                    sortedResults.length > 0
+                      ? "h-[8.5rem] max-w-[42%] sm:h-[10.5rem] sm:max-w-[40%]"
+                      : "h-[9.5rem] max-w-[55%] sm:h-[12.5rem] sm:max-w-[46%] md:h-[14rem]"
+                  }`}
+                />
               </div>
 
-              <div className="min-h-0 flex-1 overflow-auto">
-                {resultsQuery.isLoading ? (
-                  <div className="space-y-2 px-4 py-4">
-                    {Array.from({ length: 4 }).map((_, i) => (
-                      <div key={i} className="h-12 animate-pulse rounded-xl bg-[#E4F5EC]" />
-                    ))}
+              {resultsQuery.isError ? (
+                <div className="border-t border-[#DFE9E4] bg-white/80 px-5 py-6 text-center">
+                  <p className="text-sm font-semibold text-[#101D3A]">Unable to load documents</p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-3 rounded-xl"
+                    onClick={() => void resultsQuery.refetch()}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : null}
+
+              {sortedResults.length > 0 ? (
+                <div className="flex min-h-0 flex-1 flex-col border-t border-[#DFE9E4] bg-white/90 xl:min-h-0">
+                  <div className="flex flex-shrink-0 items-center justify-between gap-2 px-4 py-3 sm:px-5">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#E4F5EC] text-[#07864B]">
+                        <FileText className="h-4 w-4" />
+                      </span>
+                      <h3 className="truncate text-[15px] font-bold text-[#101D3A]">
+                        Available Documents ({sortedResults.length})
+                      </h3>
+                    </div>
+                    <span
+                      className={`inline-flex flex-shrink-0 items-center gap-1 text-[12px] font-semibold ${
+                        anyLocked ? "text-[#A20F2F]" : "text-[#07864B]"
+                      }`}
+                    >
+                      <Lock className="h-3.5 w-3.5" />
+                      {anyLocked ? "Documents locked" : "Ready"}
+                    </span>
                   </div>
-                ) : resultsLocked ? (
-                  <div className="px-5 py-10 text-center">
-                    <p className="text-sm font-semibold text-[#101D3A]">Results are locked</p>
-                    <p className="mt-1 text-sm text-[#687A93]">
-                      Enter your access code on the Results page to view recent diagnostic reports.
+
+                  <div className="min-h-0 flex-1 overflow-auto px-4 pb-3 sm:px-5">
+                    <ul className="space-y-2">
+                      {sortedResults.map((result) => (
+                        <AvailableDocumentRow key={result.id} result={result} />
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div className="flex flex-shrink-0 items-center justify-between gap-2 border-t border-[#DFE9E4] px-4 py-2.5 sm:px-5">
+                    <p className="text-xs text-[#687A93]">
+                      Showing {sortedResults.length} of {sortedResults.length} document
+                      {sortedResults.length === 1 ? "" : "s"}
                     </p>
                     <Link
                       href="/portal/results"
-                      className="mt-4 inline-flex rounded-xl bg-[#07864B] px-4 py-2 text-sm font-semibold text-white no-underline"
+                      className="text-[12px] font-semibold text-[#07864B] no-underline hover:underline"
                     >
-                      Unlock Results
+                      Open My Results
                     </Link>
-                  </div>
-                ) : resultsQuery.isError ? (
-                  <div className="px-5 py-10 text-center">
-                    <p className="text-sm font-semibold text-[#101D3A]">Unable to load results</p>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="mt-3 rounded-xl"
-                      onClick={() => void resultsQuery.refetch()}
-                    >
-                      Retry
-                    </Button>
-                  </div>
-                ) : pageRows.length === 0 ? (
-                  <div className="px-5 py-10 text-center">
-                    <p className="text-sm font-semibold text-[#101D3A]">No released results found</p>
-                    <p className="mt-1 text-sm text-[#687A93]">
-                      Released diagnostic reports will appear here.
-                    </p>
-                  </div>
-                ) : (
-                  <>
-                    <div className="divide-y divide-[#DFE9E4] md:hidden">
-                      {pageRows.map((item) => (
-                        <ResultMobileCard key={item.id} result={item} onView={setViewer} />
-                      ))}
-                    </div>
-                    <table className="hidden w-full min-w-[640px] text-left text-[13px] md:table">
-                      <thead className="sticky top-0 bg-[#F3F6F4] text-[10px] font-semibold uppercase tracking-wide text-[#687A93]">
-                        <tr>
-                          <th className="px-4 py-2.5 sm:px-5">Date Released</th>
-                          <th className="px-3 py-2.5">Study / Description</th>
-                          <th className="px-3 py-2.5">Category</th>
-                          <th className="px-3 py-2.5">Status</th>
-                          <th className="px-4 py-2.5 text-right sm:px-5">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pageRows.map((item) => (
-                          <ResultRow
-                            key={item.id}
-                            result={item}
-                            onView={setViewer}
-                            menuOpen={rowMenuId === item.id}
-                            onMenuToggle={() =>
-                              setRowMenuId((id) => (id === item.id ? null : item.id))
-                            }
-                          />
-                        ))}
-                      </tbody>
-                    </table>
-                  </>
-                )}
-              </div>
-
-              {!resultsLocked && totalResults > 0 ? (
-                <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[#DFE9E4] px-4 py-2.5 sm:px-5">
-                  <p className="text-xs text-[#687A93]">
-                    Showing {pageRows.length} of {totalResults} result{totalResults === 1 ? "" : "s"}
-                  </p>
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="outline"
-                      className="h-8 w-8 rounded-lg"
-                      disabled={page <= 1}
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      aria-label="Previous page"
-                    >
-                      <ChevronLeft className="h-4 w-4" />
-                    </Button>
-                    <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg bg-[#07864B] px-2 text-xs font-bold text-white">
-                      {page}
-                    </span>
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="outline"
-                      className="h-8 w-8 rounded-lg"
-                      disabled={page >= totalPages}
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                      aria-label="Next page"
-                    >
-                      <ChevronRight className="h-4 w-4" />
-                    </Button>
-                    <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))}>
-                      <SelectTrigger className="h-8 w-[6.5rem] rounded-lg border-[#DFE9E4] text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {[10, 20, 50].map((n) => (
-                          <SelectItem key={n} value={String(n)}>
-                            {n} / page
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
                   </div>
                 </div>
               ) : null}
@@ -467,7 +528,7 @@ export default function PortalDashboardPage() {
                   className="inline-flex items-center gap-1 text-[13px] font-semibold text-[#07864B] no-underline hover:underline"
                 >
                   View all
-                  <ChevronRight className="h-4 w-4" />
+                  <ChevronRightIcon className="h-4 w-4" />
                 </Link>
               </div>
               {overviewQuery.isLoading ? (
@@ -519,7 +580,7 @@ export default function PortalDashboardPage() {
                   className="inline-flex items-center gap-1 text-[13px] font-semibold text-[#07864B] no-underline hover:underline"
                 >
                   View all
-                  <ChevronRight className="h-4 w-4" />
+                  <ChevronRightIcon className="h-4 w-4" />
                 </Link>
               </div>
               {messageUnreadQuery.isLoading ? (
@@ -530,7 +591,7 @@ export default function PortalDashboardPage() {
                     {messageUnreadCount} unread message{messageUnreadCount === 1 ? "" : "s"}
                   </p>
                   <p className="mt-1 text-[12px] leading-relaxed text-[#687A93]">
-                    Open Messages to read updates from the hospital.
+                    Includes updates from your care team and published doctor comments on results.
                   </p>
                   <Link
                     href="/portal/messages"
@@ -543,7 +604,7 @@ export default function PortalDashboardPage() {
                 <EmptyPanel
                   icon={MessageSquare}
                   title="No new messages"
-                  body="You will see notifications from the hospital here."
+                  body="Published doctor comments and hospital messages will appear here."
                 />
               )}
             </section>
@@ -629,8 +690,8 @@ function AccessCodeInstructionsDialog({
             If an email is on your record, staff may also send the code to your registered email address.
           </li>
           <li>
-            Open <span className="font-semibold">My Results</span> and enter the code when prompted to unlock
-            your reports.
+            Use <span className="font-semibold">Unlock &amp; View Results</span> on the dashboard, or open{" "}
+            <span className="font-semibold">My Results</span>, and enter the code when prompted.
           </li>
           <li>
             If you still cannot unlock results, use the{" "}
@@ -697,108 +758,125 @@ function EmptyPanel({
   );
 }
 
-function ResultMobileCard({
-  result,
-  onView,
-}: {
-  result: PortalResult;
-  onView: (viewer: ResultViewerState) => void;
-}) {
-  const stamp = formatReleaseStamp(resultReleasedAt(result));
+function AvailableDocumentRow({ result }: { result: PortalResult }) {
+  const released = formatPortalDate(resultReleasedAt(result));
   return (
-    <div className="flex items-start justify-between gap-3 px-4 py-3">
-      <div className="min-w-0">
-        <p className="text-xs text-[#687A93]">
-          {stamp.date}
-          {stamp.time ? ` · ${stamp.time}` : ""}
-        </p>
-        <p className="mt-1 truncate text-sm font-semibold text-[#101D3A]">
+    <li className="flex items-center gap-2 rounded-xl border border-[#DFE9E4] bg-white px-3 py-3 sm:gap-3 sm:px-4">
+      <span
+        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg text-[10px] font-bold uppercase ${
+          result.fileType === "pdf" ? "bg-[#FBECEF] text-[#A20F2F]" : "bg-[#E4F5EC] text-[#07864B]"
+        }`}
+      >
+        {result.fileType === "pdf" ? "PDF" : result.fileType.slice(0, 4)}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-semibold text-[#101D3A]">
           {resultCategoryLabel(result.category)} Result
         </p>
-        <p className="mt-0.5 truncate text-[11px] text-[#687A93]">{result.originalFileName}</p>
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          <span className="rounded-full bg-[#E4F5EC] px-2 py-0.5 text-[10px] font-semibold text-[#07864B]">
-            {resultCategoryLabel(result.category)}
-          </span>
-          <span className="rounded-full bg-[#E4F5EC] px-2 py-0.5 text-[10px] font-semibold text-[#07864B]">
-            {resultStatusLabel(result.status)}
-          </span>
-        </div>
+        <p className="mt-0.5 truncate font-mono text-[11px] text-[#687A93]" title={result.originalFileName}>
+          {result.originalFileName}
+        </p>
+        <p className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-[#26364C] sm:hidden">
+          <CalendarDays className="h-3.5 w-3.5 text-[#07864B]" />
+          {released}
+        </p>
       </div>
-      <ResultViewButton
-        result={result}
-        onView={onView}
-        className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#DFE9E4] bg-white px-2.5 text-[11px] font-semibold text-[#26364C]"
-      />
-    </div>
+      <div className="hidden min-w-[7rem] flex-shrink-0 text-right sm:block">
+        <p className="inline-flex items-center gap-1 text-[12px] font-medium text-[#26364C]">
+          <CalendarDays className="h-3.5 w-3.5 text-[#07864B]" />
+          {released}
+        </p>
+        <p className="mt-0.5 text-[10px] text-[#687A93]">Released Date</p>
+      </div>
+    </li>
   );
 }
 
-function ResultRow({
-  result,
-  onView,
-  menuOpen,
-  onMenuToggle,
+function PortalDocumentPickerDialog({
+  open,
+  results,
+  locked,
+  busy,
+  onPick,
+  onClose,
 }: {
-  result: PortalResult;
-  onView: (viewer: ResultViewerState) => void;
-  menuOpen: boolean;
-  onMenuToggle: () => void;
+  open: boolean;
+  results: PortalResult[];
+  locked: boolean;
+  busy: boolean;
+  onPick: (resultId: number) => void;
+  onClose: () => void;
 }) {
-  const stamp = formatReleaseStamp(resultReleasedAt(result));
-  const study = `${resultCategoryLabel(result.category)} Result`;
+  if (!open) return null;
+
   return (
-    <tr className="border-t border-[#DFE9E4]">
-      <td className="whitespace-nowrap px-4 py-3 sm:px-5">
-        <p className="font-medium text-[#101D3A]">{stamp.date}</p>
-        <p className="text-[11px] text-[#687A93]">{stamp.time}</p>
-      </td>
-      <td className="px-3 py-3">
-        <p className="font-semibold text-[#101D3A]">{study}</p>
-        <p className="mt-0.5 max-w-[14rem] truncate text-[11px] text-[#687A93]" title={result.originalFileName}>
-          {result.originalFileName}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="portal-document-picker-title"
+        className="relative w-full max-w-lg rounded-2xl border border-[#DFE9E4] bg-white p-5 shadow-xl sm:p-6"
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-4 top-4 rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+          aria-label="Close document picker"
+        >
+          <X className="h-5 w-5" />
+        </button>
+
+        <h2 id="portal-document-picker-title" className="pr-10 text-xl font-bold text-[#101D3A]">
+          Choose a document
+        </h2>
+        <p className="mt-2 text-sm text-[#687A93]">
+          Select which diagnostic report to open
+          {locked ? ". Documents stay locked until you enter your access code." : "."}
         </p>
-      </td>
-      <td className="px-3 py-3">
-        <span className="rounded-full bg-[#E4F5EC] px-2.5 py-0.5 text-[10px] font-semibold text-[#07864B]">
-          {resultCategoryLabel(result.category)}
-        </span>
-      </td>
-      <td className="px-3 py-3">
-        <span className="rounded-full bg-[#E4F5EC] px-2.5 py-0.5 text-[10px] font-semibold text-[#07864B]">
-          {resultStatusLabel(result.status)}
-        </span>
-      </td>
-      <td className="px-4 py-3 text-right sm:px-5">
-        <div className="relative inline-flex items-center gap-1">
-          <ResultViewButton
-            result={result}
-            onView={onView}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#DFE9E4] bg-white px-2.5 text-[11px] font-semibold text-[#26364C] hover:border-[#07864B] hover:text-[#07864B]"
-          >
-            <Eye className="h-3.5 w-3.5" />
-            View Report
-          </ResultViewButton>
-          <button
-            type="button"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#687A93] hover:bg-[#F3F6F4]"
-            aria-label="More actions"
-            onClick={onMenuToggle}
-          >
-            <MoreHorizontal className="h-4 w-4" />
-          </button>
-          {menuOpen ? (
-            <div className="absolute right-0 top-9 z-20 min-w-[9rem] rounded-xl border border-[#DFE9E4] bg-white py-1 shadow-md">
-              <Link
-                href="/portal/results"
-                className="block px-3 py-2 text-left text-sm text-[#26364C] no-underline hover:bg-[#F3F6F4]"
-              >
-                Open My Results
-              </Link>
-            </div>
-          ) : null}
-        </div>
-      </td>
-    </tr>
+
+        <ul className="mt-4 max-h-[min(24rem,55vh)] space-y-2 overflow-auto">
+          {results.map((result) => {
+            const released = formatPortalDate(resultReleasedAt(result));
+            return (
+              <li key={result.id}>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onPick(result.id)}
+                  className="flex w-full items-center gap-3 rounded-xl border border-[#DFE9E4] bg-[#F8FCF9] px-3 py-3 text-left transition hover:border-[#07864B] hover:bg-[#E4F5EC] disabled:opacity-70"
+                >
+                  <span
+                    className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg text-[10px] font-bold uppercase ${
+                      result.fileType === "pdf"
+                        ? "bg-[#FBECEF] text-[#A20F2F]"
+                        : "bg-[#E4F5EC] text-[#07864B]"
+                    }`}
+                  >
+                    {result.fileType === "pdf" ? "PDF" : result.fileType.slice(0, 4)}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-[#101D3A]">
+                      {resultCategoryLabel(result.category)} Result
+                    </p>
+                    <p
+                      className="mt-0.5 truncate font-mono text-[11px] text-[#687A93]"
+                      title={result.originalFileName}
+                    >
+                      {result.originalFileName}
+                    </p>
+                    <p className="mt-1 text-[11px] text-[#687A93]">Released {released}</p>
+                  </div>
+                  <ChevronRightIcon className="h-4 w-4 flex-shrink-0 text-[#07864B]" />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+
+        <Button type="button" variant="ghost" className="mt-4 h-10 w-full text-[#687A93]" onClick={onClose}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }

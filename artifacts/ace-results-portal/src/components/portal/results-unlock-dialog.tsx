@@ -13,6 +13,7 @@ export function PortalResultsUnlockDialog({
   error,
   requestBusy,
   requestMessage,
+  documentTitle,
   onSubmit,
   onClose,
   onRequestAccessCode,
@@ -22,6 +23,8 @@ export function PortalResultsUnlockDialog({
   error: string | null;
   requestBusy?: boolean;
   requestMessage?: string | null;
+  /** When set, unlock is scoped to this diagnostic document. */
+  documentTitle?: string | null;
   onSubmit: (accessCode: string) => void;
   onClose: () => void;
   onRequestAccessCode: () => void;
@@ -55,7 +58,9 @@ export function PortalResultsUnlockDialog({
 
         <h2 className="pr-10 text-xl font-bold text-[#17221D]">Enter your access code</h2>
         <p className="mt-2 text-sm text-[#64706A]">
-          Your access code is required to view and download diagnostic results. It is separate from your sign-in password.
+          {documentTitle
+            ? `Enter the access code for “${documentTitle}”. Each document has its own code, separate from your sign-in password.`
+            : "Your access code is required to view and download this diagnostic document. It is separate from your sign-in password."}
         </p>
 
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">

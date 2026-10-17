@@ -50,6 +50,11 @@ function fakeResult(overrides: Partial<ResultRow> = {}): ResultRow {
     uploadedAt: new Date(),
     createdAt: new Date(),
     updatedAt: new Date(),
+    accessCodeHash: null,
+    accessCodeEncrypted: null,
+    accessCodeIssuedAt: null,
+    accessCodeEmailedAt: null,
+    accessCodeEmailStatus: null,
     ...overrides,
   };
 }
@@ -75,6 +80,8 @@ function fakeUser(overrides: Partial<User> = {}): User {
     failedLoginAttempts: 0,
     lockedUntil: null,
     lastLoginAt: null,
+    mustChangePassword: false,
+    passwordExpiresAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -219,7 +226,7 @@ test("15 — old notification does not grant access after removal", async () => 
     { type: "result_assigned", entityType: "result", entityId: 123 },
     "physician",
   );
-  assert.equal(href, "/physician/results");
+  assert.equal(href, "/physician/results?resultId=123");
   const deps = accessDeps({ privatePhysicians: [] });
   assert.equal(await canAccessResult(physician(7), fakeResult({ status: "pending" }), deps), false);
 });
@@ -285,7 +292,7 @@ test("22 — result_assigned body is generic (no PHI/secrets)", () => {
 test("23 — assignment notification deep-link stays on doctor results", () => {
   assert.equal(
     notificationHref({ type: "result_assigned", entityType: "result", entityId: 123 }, "physician"),
-    "/physician/results",
+    "/physician/results?resultId=123",
   );
   assert.equal(
     notificationHref({ type: "result_released", entityType: "result", entityId: 123 }, "portal"),

@@ -317,7 +317,7 @@ export async function insertPatient(
     dateOfBirth: string;
     mobileNumber: string | null;
     email: string | null;
-    accessCodeHash: string;
+    accessCodeHash: string | null;
     createdById: number | null;
     portalUserId?: number | null;
   },
@@ -381,6 +381,14 @@ export async function updatePatient(
     );
   const row = result.recordset[0] as Record<string, unknown> | undefined;
   return row ? mapPatient(row) : undefined;
+}
+
+/** Bump updated_at so department-linked existing patients rise in the Staff Patients list. */
+export async function touchUpdatedAt(id: number, tx?: Transaction): Promise<void> {
+  if (!tx) await getPool();
+  await request(tx)
+    .input("id", sql.Int, id)
+    .query(`UPDATE dbo.patients SET updated_at = SYSDATETIMEOFFSET() WHERE id = @id`);
 }
 
 export async function updateAccessCodeHash(id: number, accessCodeHash: string): Promise<Patient | undefined> {

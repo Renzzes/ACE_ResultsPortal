@@ -394,7 +394,7 @@ export async function customFetch<T = unknown>(
     }
     if (_portalAccessCodeGetter && !finalHeaders.has("x-portal-access-code")) {
       const url = requestInfo.url;
-      if (url.includes("/portal/results")) {
+      if (url.includes("/portal/results") || url.includes("/portal/file/")) {
         const accessCode = await _portalAccessCodeGetter();
         if (accessCode) {
           finalHeaders.set("x-portal-access-code", accessCode);

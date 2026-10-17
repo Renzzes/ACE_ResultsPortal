@@ -127,12 +127,14 @@ export function ResultCommentDialog({
 }) {
   const queryClient = useQueryClient();
   const [comment, setComment] = useState("");
+  const [shareWithPatient, setShareWithPatient] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setComment(myReview?.comment ?? "");
+    setShareWithPatient(false);
     setError(null);
   }, [open, resultId, myReview?.comment]);
 
@@ -144,9 +146,10 @@ export function ResultCommentDialog({
         reviewed: boolean;
         reviewedAt: string | null;
         comment: string | null;
+        patientVisible?: boolean;
       }>(`/api/results/${resultId}/review`, {
         method: "PUT",
-        body: JSON.stringify({ comment }),
+        body: JSON.stringify({ comment, shareWithPatient }),
       });
       const review: ResultReviewState = {
         reviewed: true,
@@ -198,6 +201,21 @@ export function ResultCommentDialog({
               Saving updates your review.
             </p>
           ) : null}
+          <label className="flex items-start gap-2 rounded-xl border border-[hsl(var(--doc-border))] bg-[hsl(var(--doc-cream))] px-3 py-2.5 text-[12px] text-[hsl(var(--doc-text))]">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={shareWithPatient}
+              onChange={(event) => setShareWithPatient(event.target.checked)}
+            />
+            <span>
+              <span className="font-semibold">Share this comment with the patient</span>
+              <span className="mt-0.5 block doc-muted">
+                Off by default. When enabled, the comment appears in the patient&apos;s Messages.
+                Internal notes stay private unless you share them.
+              </span>
+            </span>
+          </label>
           {error ? <p className="text-xs text-[hsl(var(--doc-maroon))]">{error}</p> : null}
         </div>
         <DialogFooter className="gap-2 sm:gap-2">

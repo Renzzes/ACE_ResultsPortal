@@ -1,5 +1,11 @@
 import type { Transaction } from "mssql";
-import type { ReleaseOption, ResultCategory, ResultRow, ResultStatus } from "../types";
+import type {
+  ReleaseOption,
+  ResultAccessCodeEmailStatus,
+  ResultCategory,
+  ResultRow,
+  ResultStatus,
+} from "../types";
 import { mapResult } from "../mappers";
 import { getPool, request, sql } from "../pool";
 import { bindInInts, bindInStrings } from "../sql-helpers";
@@ -8,7 +14,29 @@ import { schemaReady as resultPhysiciansSchemaReady } from "./result-physicians"
 const RESULT_COLUMNS = `
   id, patient_id, category, file_name, original_file_name, file_type, file_size_bytes,
   release_option, scheduled_release_date, date_released, status, remarks,
-  uploaded_by_id, uploaded_at, created_at, updated_at
+  uploaded_by_id, uploaded_at, created_at, updated_at,
+  access_code_hash, access_code_encrypted, access_code_issued_at,
+  access_code_emailed_at, access_code_email_status
+`;
+
+const RESULT_INSERTED_OUTPUT = `
+  INSERTED.id, INSERTED.patient_id, INSERTED.category, INSERTED.file_name,
+  INSERTED.original_file_name, INSERTED.file_type, INSERTED.file_size_bytes,
+  INSERTED.release_option, INSERTED.scheduled_release_date, INSERTED.date_released,
+  INSERTED.status, INSERTED.remarks, INSERTED.uploaded_by_id, INSERTED.uploaded_at,
+  INSERTED.created_at, INSERTED.updated_at,
+  INSERTED.access_code_hash, INSERTED.access_code_encrypted, INSERTED.access_code_issued_at,
+  INSERTED.access_code_emailed_at, INSERTED.access_code_email_status
+`;
+
+const RESULT_DELETED_OUTPUT = `
+  DELETED.id, DELETED.patient_id, DELETED.category, DELETED.file_name,
+  DELETED.original_file_name, DELETED.file_type, DELETED.file_size_bytes,
+  DELETED.release_option, DELETED.scheduled_release_date, DELETED.date_released,
+  DELETED.status, DELETED.remarks, DELETED.uploaded_by_id, DELETED.uploaded_at,
+  DELETED.created_at, DELETED.updated_at,
+  DELETED.access_code_hash, DELETED.access_code_encrypted, DELETED.access_code_issued_at,
+  DELETED.access_code_emailed_at, DELETED.access_code_email_status
 `;
 
 export async function findResultById(id: number): Promise<ResultRow | undefined> {
@@ -222,11 +250,7 @@ export async function updateResultFileName(
     .query(
       `UPDATE dbo.results
        SET file_name = @fileName, updated_at = SYSDATETIMEOFFSET()
-       OUTPUT INSERTED.id, INSERTED.patient_id, INSERTED.category, INSERTED.file_name,
-              INSERTED.original_file_name, INSERTED.file_type, INSERTED.file_size_bytes,
-              INSERTED.release_option, INSERTED.scheduled_release_date, INSERTED.date_released,
-              INSERTED.status, INSERTED.remarks, INSERTED.uploaded_by_id, INSERTED.uploaded_at,
-              INSERTED.created_at, INSERTED.updated_at
+       OUTPUT ${RESULT_INSERTED_OUTPUT}
        WHERE id = @id`,
     );
   const row = result.recordset[0] as Record<string, unknown> | undefined;
@@ -269,11 +293,7 @@ export async function insertResult(
          patient_id, category, file_name, original_file_name, file_type, file_size_bytes,
          release_option, scheduled_release_date, date_released, status, remarks, uploaded_by_id
        )
-       OUTPUT INSERTED.id, INSERTED.patient_id, INSERTED.category, INSERTED.file_name,
-              INSERTED.original_file_name, INSERTED.file_type, INSERTED.file_size_bytes,
-              INSERTED.release_option, INSERTED.scheduled_release_date, INSERTED.date_released,
-              INSERTED.status, INSERTED.remarks, INSERTED.uploaded_by_id, INSERTED.uploaded_at,
-              INSERTED.created_at, INSERTED.updated_at
+       OUTPUT ${RESULT_INSERTED_OUTPUT}
        VALUES (
          @patientId, @category, @fileName, @originalFileName, @fileType, @fileSizeBytes,
          @releaseOption, @scheduledReleaseDate, @dateReleased, @status, @remarks, @uploadedById
@@ -318,13 +338,56 @@ export async function updateResult(
        SET category = @category, release_option = @releaseOption,
            scheduled_release_date = @scheduledReleaseDate, remarks = @remarks,
            status = @status, date_released = @dateReleased, updated_at = SYSDATETIMEOFFSET()
-       OUTPUT INSERTED.id, INSERTED.patient_id, INSERTED.category, INSERTED.file_name,
-              INSERTED.original_file_name, INSERTED.file_type, INSERTED.file_size_bytes,
-              INSERTED.release_option, INSERTED.scheduled_release_date, INSERTED.date_released,
-              INSERTED.status, INSERTED.remarks, INSERTED.uploaded_by_id, INSERTED.uploaded_at,
-              INSERTED.created_at, INSERTED.updated_at
+       OUTPUT ${RESULT_INSERTED_OUTPUT}
        WHERE id = @id`,
     );
+  const row = result.recordset[0] as Record<string, unknown> | undefined;
+  return row ? mapResult(row) : undefined;
+}
+
+export async function updateResultAccessCredential(
+  id: number,
+  input: {
+    accessCodeHash: string | null;
+    accessCodeEncrypted: string | null;
+    accessCodeIssuedAt: Date | null;
+    accessCodeEmailedAt: Date | null;
+    accessCodeEmailStatus: ResultAccessCodeEmailStatus | null;
+    /** When set, only update if the current hash matches (optimistic concurrency). */
+    expectedHash?: string | null;
+  },
+  tx?: Transaction,
+): Promise<ResultRow | undefined> {
+  if (!tx) await getPool();
+  const req = request(tx)
+    .input("id", sql.Int, id)
+    .input("accessCodeHash", sql.NVarChar(255), input.accessCodeHash)
+    .input("accessCodeEncrypted", sql.NVarChar(512), input.accessCodeEncrypted)
+    .input("accessCodeIssuedAt", sql.DateTimeOffset, input.accessCodeIssuedAt)
+    .input("accessCodeEmailedAt", sql.DateTimeOffset, input.accessCodeEmailedAt)
+    .input("accessCodeEmailStatus", sql.NVarChar(32), input.accessCodeEmailStatus);
+
+  const expectedClause =
+    input.expectedHash === undefined
+      ? ""
+      : input.expectedHash === null
+        ? " AND access_code_hash IS NULL"
+        : " AND access_code_hash = @expectedHash";
+  if (input.expectedHash !== undefined && input.expectedHash !== null) {
+    req.input("expectedHash", sql.NVarChar(255), input.expectedHash);
+  }
+
+  const result = await req.query(
+    `UPDATE dbo.results
+     SET access_code_hash = @accessCodeHash,
+         access_code_encrypted = @accessCodeEncrypted,
+         access_code_issued_at = @accessCodeIssuedAt,
+         access_code_emailed_at = @accessCodeEmailedAt,
+         access_code_email_status = @accessCodeEmailStatus,
+         updated_at = SYSDATETIMEOFFSET()
+     OUTPUT ${RESULT_INSERTED_OUTPUT}
+     WHERE id = @id${expectedClause}`,
+  );
   const row = result.recordset[0] as Record<string, unknown> | undefined;
   return row ? mapResult(row) : undefined;
 }
@@ -335,11 +398,7 @@ export async function deleteResult(id: number, tx?: Transaction): Promise<Result
     .input("id", sql.Int, id)
     .query(
       `DELETE FROM dbo.results
-       OUTPUT DELETED.id, DELETED.patient_id, DELETED.category, DELETED.file_name,
-              DELETED.original_file_name, DELETED.file_type, DELETED.file_size_bytes,
-              DELETED.release_option, DELETED.scheduled_release_date, DELETED.date_released,
-              DELETED.status, DELETED.remarks, DELETED.uploaded_by_id, DELETED.uploaded_at,
-              DELETED.created_at, DELETED.updated_at
+       OUTPUT ${RESULT_DELETED_OUTPUT}
        WHERE id = @id`,
     );
   const row = result.recordset[0] as Record<string, unknown> | undefined;
@@ -516,11 +575,7 @@ export async function releaseDueScheduledResults(): Promise<ResultRow[]> {
     SET status = N'released',
         date_released = SYSDATETIMEOFFSET(),
         updated_at = SYSDATETIMEOFFSET()
-    OUTPUT INSERTED.id, INSERTED.patient_id, INSERTED.category, INSERTED.file_name,
-           INSERTED.original_file_name, INSERTED.file_type, INSERTED.file_size_bytes,
-           INSERTED.release_option, INSERTED.scheduled_release_date, INSERTED.date_released,
-           INSERTED.status, INSERTED.remarks, INSERTED.uploaded_by_id, INSERTED.uploaded_at,
-           INSERTED.created_at, INSERTED.updated_at
+    OUTPUT ${RESULT_INSERTED_OUTPUT}
     WHERE status = N'pending'
       AND release_option = N'scheduled'
       AND scheduled_release_date IS NOT NULL

@@ -101,6 +101,10 @@ export function formatResult(
     createdAt: r.createdAt.toISOString(),
     assignedPhysician: assignedPhysicians[0] ?? null,
     assignedPhysicians,
+    hasAccessCode: Boolean(r.accessCodeHash),
+    accessCodeIssuedAt: r.accessCodeIssuedAt ? r.accessCodeIssuedAt.toISOString() : null,
+    accessCodeEmailedAt: r.accessCodeEmailedAt ? r.accessCodeEmailedAt.toISOString() : null,
+    accessCodeEmailStatus: r.accessCodeEmailStatus ?? null,
     ...(extras.reviews !== undefined ? { reviews: extras.reviews } : {}),
     ...(extras.myReview !== undefined ? { myReview: extras.myReview } : {}),
   };

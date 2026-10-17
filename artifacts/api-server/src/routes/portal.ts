@@ -61,8 +61,9 @@ import {
 import {
   RESULTS_ACCESS_INVALID_ERROR,
   RESULTS_ACCESS_REQUIRED_ERROR,
-  verifyPortalResultsAccessCode,
+  verifyPortalResultAccessCode,
 } from "../lib/portal-result-access";
+import { verifyResultAccessCode } from "../lib/result-access-code";
 import { isValidPortalPassword } from "../lib/portal-password-policy";
 import {
   completeForcedPasswordChange,
@@ -384,10 +385,16 @@ router.post("/portal/recover/confirm", identityVerifyLimiter, async (req, res): 
 });
 
 /** Validates the diagnostic access code for viewing results. Requires a portal session. */
+/** Validates a document-specific access code. Requires portal session + resultId. */
 router.post("/portal/verify", requirePortalAuth, portalLimiter, async (req, res): Promise<void> => {
   const accessCode = typeof req.body?.accessCode === "string" ? req.body.accessCode.trim() : "";
+  const resultId = Number(req.body?.resultId);
   if (!accessCode || accessCode.length > 32) {
     res.status(400).json({ error: RESULTS_ACCESS_INVALID_ERROR });
+    return;
+  }
+  if (!Number.isFinite(resultId) || resultId <= 0) {
+    res.status(400).json({ error: "Select a document to unlock." });
     return;
   }
 
@@ -403,20 +410,26 @@ router.post("/portal/verify", requirePortalAuth, portalLimiter, async (req, res)
     return;
   }
 
-  if (!patient.accessCodeHash) {
-    res.status(403).json({ error: RESULTS_ACCESS_INVALID_ERROR });
+  const result = await resultsRepo.findResultById(resultId);
+  if (!result || !canPortalAccessResult(result, req.portalUser!.patientId)) {
+    res.status(404).json({ error: "Result not found or not yet released" });
+    return;
+  }
+  if (!result.accessCodeHash) {
+    res.status(409).json({ error: "This document does not have an access code yet. Contact hospital staff." });
     return;
   }
 
-  const codeOk = await compareAccessCode(accessCode, patient.accessCodeHash);
+  const codeOk = await verifyResultAccessCode(result, accessCode);
   if (!codeOk) {
     await logAuditBestEffort({
       action: "access_denied",
       req,
       patientHisId: patient.patientHisId,
+      resultId: result.id,
       details: JSON.stringify({
         source: "ACE_ResultsPortal",
-        operation: "portal_results_access",
+        operation: "portal_result_access",
         result: "failed",
       }),
     });
@@ -428,40 +441,22 @@ router.post("/portal/verify", requirePortalAuth, portalLimiter, async (req, res)
     action: "view",
     req,
     patientHisId: patient.patientHisId,
+    resultId: result.id,
     details: JSON.stringify({
       source: "ACE_ResultsPortal",
-      operation: "portal_results_access",
+      operation: "portal_result_access",
       result: "success",
     }),
   });
 
-  res.json({ unlocked: true });
+  res.json({ unlocked: true, resultId: result.id });
 });
 
-/** @deprecated Prefer POST /portal/verify after portal login for results access. */
+/** @deprecated Prefer POST /portal/verify with resultId. */
 router.post("/portal/results/unlock", requirePortalAuth, portalLimiter, async (req, res): Promise<void> => {
-  const accessCode = typeof req.body?.accessCode === "string" ? req.body.accessCode.trim() : "";
-  if (!accessCode || accessCode.length > 32) {
-    res.status(400).json({ error: RESULTS_ACCESS_INVALID_ERROR });
-    return;
-  }
-
-  const patient = await patientsRepo.findPatientById(req.portalUser!.patientId);
-  if (!patient) {
-    res.status(404).json({ error: "Patient not found" });
-    return;
-  }
-
-  const codeOk = await compareAccessCode(accessCode, patient.accessCodeHash ?? "");
-  if (!codeOk) {
-    res.status(401).json({ error: RESULTS_ACCESS_INVALID_ERROR });
-    return;
-  }
-
-  res.json({ unlocked: true });
+  res.status(400).json({ error: "Select a document and use the document unlock flow." });
 });
 
-/** Patient portal login — Hospital Patient ID (or username) + password. */
 router.post("/portal/login", portalLimiter, async (req, res): Promise<void> => {
   const identifier = typeof req.body?.identifier === "string" ? req.body.identifier.trim() : "";
   const password = typeof req.body?.password === "string" ? req.body.password : "";
@@ -947,12 +942,6 @@ router.get("/portal/results", requirePortalAuth, async (req, res): Promise<void>
     return;
   }
 
-  const accessOk = await verifyPortalResultsAccessCode(req, patient);
-  if (!accessOk) {
-    res.status(403).json({ error: RESULTS_ACCESS_REQUIRED_ERROR, code: "RESULTS_LOCKED" });
-    return;
-  }
-
   const results = await resultsRepo.listResultsForPatient(req.portalUser!.patientId, {
     status: "released",
   });
@@ -967,6 +956,8 @@ router.get("/portal/results", requirePortalAuth, async (req, res): Promise<void>
       remarks: r.remarks ?? null,
       uploadedAt: r.uploadedAt.toISOString(),
       dateReleased: r.dateReleased ? r.dateReleased.toISOString() : null,
+      locked: true,
+      hasAccessCode: Boolean(r.accessCodeHash),
     })),
   );
 });
@@ -1050,15 +1041,15 @@ router.get("/portal/results/:id/download", requirePortalAuth, async (req, res): 
     return;
   }
 
-  const accessOk = await verifyPortalResultsAccessCode(req, patient);
-  if (!accessOk) {
-    res.status(403).json({ error: RESULTS_ACCESS_REQUIRED_ERROR, code: "RESULTS_LOCKED" });
-    return;
-  }
-
   const result = await resultsRepo.findResultById(params.data.id);
   if (!result || !canPortalAccessResult(result, req.portalUser!.patientId)) {
     res.status(404).json({ error: "Result not found or not yet released" });
+    return;
+  }
+
+  const accessOk = await verifyPortalResultAccessCode(req, result);
+  if (!accessOk) {
+    res.status(403).json({ error: RESULTS_ACCESS_REQUIRED_ERROR, code: "RESULTS_LOCKED" });
     return;
   }
 

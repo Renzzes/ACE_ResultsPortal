@@ -15,18 +15,15 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
-import { copyText } from "@/lib/copy-text";
 import { canUploadResultFileUi } from "@/lib/staff-permissions";
 import { registrationUploadPath } from "@/lib/workflow-stability";
 import {
-  Check,
-  Copy,
   ArrowLeft,
   AlertTriangle,
+  Check,
   Upload,
   Stethoscope,
   X,
-  Mail,
   Search,
   Info,
   UserPlus,
@@ -87,17 +84,6 @@ function FieldLabel({
 const fieldInputClass =
   "h-9 rounded-lg border-[hsl(var(--st-border))] bg-white text-sm shadow-sm focus-visible:border-[hsl(var(--st-green))] focus-visible:ring-[hsl(var(--st-green))]/20";
 
-function maskEmailAddress(email: string): string {
-  const [local, domain] = email.split("@");
-  if (!local || !domain) return "***";
-  return `${local.slice(0, 1)}***@${domain}`;
-}
-
-function isValidEmail(value: string): boolean {
-  const email = value.trim();
-  return email.length > 0 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
 interface Physician { id: number; name: string; username: string }
 
 interface HospitalLookupResult {
@@ -130,20 +116,9 @@ export default function NewPatientPage() {
     dateOfBirth: "", mobileNumber: "", email: "",
   });
   const [created, setCreated] = useState<{
-    accessCode: string;
     id: number;
     name: string;
-    email: string | null;
-    /** Pending registration code can no longer be emailed from this screen. */
-    codeEmailUnavailable: boolean;
-    lastEmailAcceptedMasked: string | null;
   } | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
-  const [emailSendPending, setEmailSendPending] = useState(false);
-  const [addEmailOpen, setAddEmailOpen] = useState(false);
-  const [addEmailValue, setAddEmailValue] = useState("");
-  const [addEmailError, setAddEmailError] = useState<string | null>(null);
   const [lookup, setLookup] = useState<HospitalLookupResult | null>(null);
   const [lookupUnavailable, setLookupUnavailable] = useState(false);
   const [reusePending, setReusePending] = useState(false);
@@ -303,20 +278,9 @@ export default function NewPatientPage() {
       },
       {
         onSuccess: (data) => {
-          if (!data.accessCode) {
-            toast({ title: "This patient is now available to your department." });
-            setLocation(`/patients/${data.id}`);
-            return;
-          }
-          const savedEmail =
-            typeof data.email === "string" && data.email.trim() ? data.email.trim() : form.email.trim() || null;
           setCreated({
-            accessCode: data.accessCode,
             id: data.id,
             name: `${data.firstName} ${data.lastName}`,
-            email: savedEmail,
-            codeEmailUnavailable: false,
-            lastEmailAcceptedMasked: null,
           });
         },
         onError: (err: any) => {
@@ -327,296 +291,15 @@ export default function NewPatientPage() {
     );
   };
 
-  const copyCode = async () => {
-    setCopyError(null);
-    const ok = await copyText(created!.accessCode);
-    if (!ok) {
-      setCopyError("Unable to copy automatically. Please copy the access code manually.");
-      return;
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
 
-  const sendDiagnosticAccessCodeEmail = async (emailOverride?: string) => {
-    if (!created || emailSendPending || created.codeEmailUnavailable) return;
-    setEmailSendPending(true);
-    setAddEmailError(null);
-    try {
-      const body = emailOverride ? { email: emailOverride.trim() } : {};
-      const result = await customFetch<{
-        success?: boolean;
-        message?: string;
-        emailedToMasked?: string;
-        emailSaved?: boolean;
-        delivery?: string;
-        error?: string;
-      }>(`/api/patients/${created.id}/email-diagnostic-access-code`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      const masked =
-        result.emailedToMasked ??
-        (emailOverride ? maskEmailAddress(emailOverride) : created.email ? maskEmailAddress(created.email) : null);
-      if (emailOverride) {
-        setCreated((current) =>
-          current
-            ? {
-                ...current,
-                email: emailOverride.trim(),
-                lastEmailAcceptedMasked: masked,
-              }
-            : current,
-        );
-        setAddEmailOpen(false);
-        setAddEmailValue("");
-      } else {
-        setCreated((current) =>
-          current ? { ...current, lastEmailAcceptedMasked: masked } : current,
-        );
-      }
-      toast({
-        title: "Email accepted for sending",
-        description: masked
-          ? `Accepted for sending to ${masked}. This does not create a Patient Portal login.`
-          : result.message ?? "The diagnostic access code email was accepted for sending.",
-      });
-    } catch (err: any) {
-      const status = err?.status as number | undefined;
-      const reason = err?.data?.reason as string | undefined;
-      const emailSaved = Boolean(err?.data?.emailSaved);
-      const message =
-        err?.data?.error ?? err?.message ?? "Could not email the access code. Please try again.";
-      const isNetwork =
-        !status &&
-        (err?.name === "TypeError" ||
-          /failed to fetch|network|aborted|timeout/i.test(String(err?.message ?? err ?? "")));
-
-      if (emailOverride && emailSaved) {
-        setCreated((current) => (current ? { ...current, email: emailOverride.trim() } : current));
-        setAddEmailOpen(false);
-        setAddEmailValue("");
-      }
-
-      if (status === 410 || reason === "pending_code_unavailable") {
-        setCreated((current) =>
-          current ? { ...current, codeEmailUnavailable: true } : current,
-        );
-        setAddEmailOpen(false);
-        toast({
-          title: "Access code no longer available to email",
-          description:
-            "The access code is no longer available for email delivery. Open the patient record and use Regenerate Access Code, then send the new code.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      if (status === 409 || reason === "send_in_progress") {
-        toast({
-          title: "Send already in progress",
-          description: message,
-          variant: "destructive",
-        });
-        return;
-      }
-
-      if (status === 400 && (reason === "email_required" || (!created.email && !emailOverride))) {
-        toast({
-          title: "Email address required",
-          description: "An email address is required to send this access code. Add the patient's email address to continue.",
-          variant: "destructive",
-        });
-        setAddEmailOpen(true);
-        return;
-      }
-
-      if (isNetwork) {
-        toast({
-          title: "Delivery uncertain",
-          description:
-            "The request timed out or the network failed before a response arrived. Ask the patient whether they received the email before sending again. Do not assume it failed.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      if (status === 503 && emailSaved) {
-        toast({
-          title: "Email saved, delivery failed",
-          description: `${message} The address was saved — you can retry sending without re-entering it.`,
-          variant: "destructive",
-        });
-        if (emailOverride) setAddEmailError(message);
-        return;
-      }
-
-      if (emailOverride && !emailSaved) {
-        setAddEmailError(message);
-      }
-      toast({ title: message, variant: "destructive" });
-    } finally {
-      setEmailSendPending(false);
-    }
-  };
-
-  const onEmailAccessCodeClick = () => {
-    if (!created) return;
-    if (created.codeEmailUnavailable) {
-      setLocation(`/patients/${created.id}`);
-      return;
-    }
-    if (!created.email) {
-      toast({
-        title: "Email address required",
-        description: "An email address is required to send this access code. Add the patient's email address to continue.",
-        variant: "destructive",
-      });
-      setAddEmailOpen(true);
-      setAddEmailValue("");
-      setAddEmailError(null);
-      return;
-    }
-    void sendDiagnosticAccessCodeEmail();
-  };
-
-  const onAddEmailSend = () => {
-    const trimmed = addEmailValue.trim();
-    if (!trimmed) {
-      setAddEmailError("Email is required.");
-      return;
-    }
-    if (!isValidEmail(trimmed)) {
-      setAddEmailError("Enter a valid email address.");
-      return;
-    }
-    void sendDiagnosticAccessCodeEmail(trimmed);
-  };
-
-  if (created) {
-    return (
-      <StaffLayout title="Patient Registered">
-        <div className="mx-auto w-full max-w-3xl space-y-6">
-          <div className="text-center space-y-2">
-            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto">
-              <Check className="w-8 h-8 text-green-600" />
-            </div>
-            <h2 className="text-2xl font-bold text-primary">Patient Registered</h2>
-            <p className="text-muted-foreground">
-              {created.name} has been registered as a hospital patient record. This does not create a Patient Portal login.
-            </p>
-            {selectedPhysician && (
-              <p className="text-sm text-muted-foreground">
-                Assigned to <span className="font-medium">{selectedPhysician.name}</span>
-              </p>
-            )}
-          </div>
-
-          <div className="bg-card border-2 border-secondary/30 rounded-xl p-6 text-center space-y-3">
-            <p className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Secure Access Code</p>
-            {created.codeEmailUnavailable ? (
-              <>
-                <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                  This access code can no longer be emailed from this screen (expired, server restart, or already superseded).
-                  Open the patient record and use <span className="font-medium">Regenerate Access Code</span>, then send the new code.
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  You may still copy the code shown at registration only if you are certain it was not replaced.
-                </p>
-              </>
-            ) : null}
-            <p className="text-3xl font-mono font-bold text-primary tracking-widest">{created.accessCode}</p>
-            <p className="text-xs text-muted-foreground">Provide this code to the patient to access their results</p>
-            {created.lastEmailAcceptedMasked ? (
-              <p className="text-xs text-muted-foreground">
-                Last email accepted for sending to {created.lastEmailAcceptedMasked}
-              </p>
-            ) : null}
-            <Button type="button" variant="outline" size="sm" onClick={() => void copyCode()} className="gap-2">
-              {copied ? <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />}
-              {copied ? "Copied" : "Copy Access Code"}
-            </Button>
-            {copyError ? <p className="text-sm text-red-700">{copyError}</p> : null}
-          </div>
-
-          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-            <Button className="flex-1" onClick={() => setLocation(`/patients/${created.id}`)}>View Patient</Button>
-            {canUpload ? (
-              <Button variant="outline" className="flex-1" onClick={() => setLocation(registrationUploadPath(created.id))}>
-                <Upload className="w-4 h-4 mr-1.5" />Upload Result
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              className="flex-1"
-              disabled={emailSendPending}
-              onClick={onEmailAccessCodeClick}
-            >
-              <Mail className="w-4 h-4 mr-1.5" />
-              {emailSendPending
-                ? "Sending…"
-                : created.codeEmailUnavailable
-                  ? "Open Patient to Reissue Code"
-                  : "Email this Access Code"}
-            </Button>
-            <Button variant="ghost" onClick={() => {
-              setCreated(null);
-              setAddEmailOpen(false);
-              setAddEmailValue("");
-              setAddEmailError(null);
-              setForm({ patientHisId: "", lastName: "", firstName: "", middleName: "", dateOfBirth: "", mobileNumber: "", email: "" });
-              setLookup(null);
-              setLookupUnavailable(false);
-              setHisVerified(false);
-              setSelectedPhysician(null);
-              setPhysicianSearch("");
-            }}>Add Another</Button>
-          </div>
-        </div>
-
-        <Dialog open={addEmailOpen} onOpenChange={(open) => {
-          if (emailSendPending) return;
-          setAddEmailOpen(open);
-          if (!open) {
-            setAddEmailError(null);
-          }
-        }}>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle>Add Patient Email</DialogTitle>
-              <DialogDescription>
-                Add an email for {created.name}, then send the diagnostic access code. This does not create a Patient Portal account.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-1.5">
-              <Label htmlFor="add-patient-email">Email Address <span className="text-destructive">*</span></Label>
-              <Input
-                id="add-patient-email"
-                type="email"
-                autoComplete="email"
-                placeholder="patient@email.com"
-                value={addEmailValue}
-                disabled={emailSendPending}
-                onChange={(e) => {
-                  setAddEmailValue(e.target.value);
-                  setAddEmailError(null);
-                }}
-              />
-              {addEmailError ? <p className="text-sm text-destructive">{addEmailError}</p> : null}
-            </div>
-            <DialogFooter className="gap-2 sm:gap-0">
-              <Button type="button" variant="outline" disabled={emailSendPending} onClick={() => setAddEmailOpen(false)}>
-                Cancel
-              </Button>
-              <Button type="button" disabled={emailSendPending} onClick={onAddEmailSend}>
-                {emailSendPending ? "Sending…" : "Send"}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      </StaffLayout>
-    );
+  function resetRegistrationForm() {
+    setCreated(null);
+    setForm({ patientHisId: "", lastName: "", firstName: "", middleName: "", dateOfBirth: "", mobileNumber: "", email: "" });
+    setLookup(null);
+    setLookupUnavailable(false);
+    setHisVerified(false);
+    setSelectedPhysician(null);
+    setPhysicianSearch("");
   }
 
   const registerDisabled =
@@ -648,7 +331,7 @@ export default function NewPatientPage() {
               New Patient
             </h1>
             <p className="mt-0.5 text-xs st-muted sm:text-sm">
-              Register a hospital patient record and generate a diagnostic access code.
+              Register a hospital patient record. Document access codes are issued when a result is uploaded.
             </p>
           </div>
         </div>
@@ -938,6 +621,54 @@ export default function NewPatientPage() {
           </div>
         </form>
       </div>
+
+      <Dialog
+        open={created != null}
+        onOpenChange={(open) => {
+          if (!open) resetRegistrationForm();
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Patient Registered</DialogTitle>
+            <DialogDescription>
+              The patient has been registered successfully.
+              {created ? ` ${created.name} is now available in the Staff Portal.` : null}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <Button
+              className="w-full"
+              onClick={() => {
+                if (!created) return;
+                const id = created.id;
+                setCreated(null);
+                setLocation(`/patients/${id}`);
+              }}
+            >
+              View Patient
+            </Button>
+            {canUpload ? (
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => {
+                  if (!created) return;
+                  const id = created.id;
+                  setCreated(null);
+                  setLocation(registrationUploadPath(id));
+                }}
+              >
+                <Upload className="mr-1.5 h-4 w-4" />
+                Upload Result
+              </Button>
+            ) : null}
+            <Button type="button" variant="ghost" className="w-full" onClick={resetRegistrationForm}>
+              Register Another Patient
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </StaffLayout>
   );
 }

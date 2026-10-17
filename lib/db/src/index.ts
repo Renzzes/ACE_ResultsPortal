@@ -1,4 +1,9 @@
-export { loadRootEnv, findRepoRoot, type RootEnvLoadResult } from "./load-env";
+export {
+  loadRootEnv,
+  findRepoRoot,
+  resetRootEnvCache,
+  type RootEnvLoadResult,
+} from "./load-env";
 export * from "./result-files";
 export { initDb, closePool, getPool, withTransaction, sql } from "./pool";
 export { getHisPool, closeHisPool, checkHisConnectivity } from "./his-pool";

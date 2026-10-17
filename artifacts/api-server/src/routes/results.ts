@@ -33,10 +33,11 @@ import { requireAuth } from "../middlewares/auth";
 import { upload, getFilePath, deleteFile } from "../lib/storage";
 import { signDownloadToken, verifyToken } from "../lib/auth";
 import { denyAccess, logAudit } from "../lib/audit";
-import { formatResult } from "../lib/formatters";
+import { formatResult, resolvePatientPortalEmail } from "../lib/formatters";
 import { assertAssignablePhysician, canAccessResult, canMutateResult } from "../lib/result-access";
 import {
   canArchiveResult,
+  canRegenerateAccessCode,
   canDeleteResult,
   canReleaseResult,
   canRestoreArchive,
@@ -48,6 +49,12 @@ import {
   scopeFailure,
 } from "../lib/rbac";
 import { notifyResultUploaded } from "../lib/notify-result-upload";
+import {
+  isValidRecipientEmail,
+  issueResultAccessCode,
+  normalizeRecipientEmail,
+  revealResultAccessCodeForPrint,
+} from "../lib/result-access-code";
 import { notifyResultAssigned } from "../lib/notify-result-assigned";
 import { notifyPatientResultReleased } from "../lib/notify-result-released";
 import { notifyStaffOfPhysicianReview } from "../lib/notify-result-reviewed";
@@ -295,6 +302,23 @@ router.post("/results/upload", requireAuth, upload.single("file"), async (req, r
     return;
   }
 
+  const rawRecipientEmail =
+    typeof req.body.recipientEmail === "string"
+      ? req.body.recipientEmail
+      : typeof req.body.patientEmail === "string"
+        ? req.body.patientEmail
+        : "";
+  const recipientEmail = normalizeRecipientEmail(
+    rawRecipientEmail || resolvePatientPortalEmail(patient.email) || "",
+  );
+  if (!isValidRecipientEmail(recipientEmail)) {
+    cleanupTemp();
+    res.status(400).json({
+      error: "A valid Patient Email Address is required to send the document access code.",
+    });
+    return;
+  }
+
   let uploadAccess: Awaited<ReturnType<typeof evaluateStaffUploadAccess>>;
   try {
     uploadAccess = await evaluateStaffUploadAccess(req.user!.role, patient.id, category);
@@ -406,7 +430,37 @@ router.post("/results/upload", requireAuth, upload.single("file"), async (req, r
       }).catch(() => undefined);
     }
 
-    res.status(201).json(formatResult(row, await resultExtras(row, req.user!)));
+    const issued = await issueResultAccessCode({
+      result: row,
+      patient,
+      email: recipientEmail,
+      mode: "upload",
+    });
+    await logAudit({
+      action: "access_code_regen",
+      req,
+      userId: req.user!.userId,
+      userName: req.user!.username,
+      patientHisId: patient.patientHisId,
+      resultId: row.id,
+      details: JSON.stringify({
+        operation: "result_access_code_issue",
+        mode: "upload",
+        emailAccepted: issued.ok ? true : issued.emailAccepted,
+        emailedToMasked: issued.ok ? issued.emailedToMasked : null,
+      }),
+    });
+
+    const finalRow = issued.result ?? row;
+    res.status(201).json({
+      ...formatResult(finalRow, await resultExtras(finalRow, req.user!)),
+      accessCodeEmail: {
+        accepted: issued.ok === true,
+        status: issued.ok ? "accepted" : "failed",
+        error: issued.ok ? null : issued.error,
+        emailedToMasked: issued.ok ? issued.emailedToMasked : null,
+      },
+    });
   } catch (err) {
     if (createdId !== null) {
       try {
@@ -954,5 +1008,253 @@ router.put("/results/:id/review", requireAuth, async (req, res): Promise<void> =
     comment: saved.comment,
   });
 });
+
+router.post("/results/:id/regenerate-access-code", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(String(req.params.id), 10);
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ error: "Invalid result id" });
+    return;
+  }
+  if (!canRegenerateAccessCode(req.user!.role)) {
+    await denyAccess(req, res, {
+      error: "Not authorized to regenerate access codes",
+      details: "Unauthorized attempt to regenerate result access code",
+      resultId: id,
+    });
+    return;
+  }
+
+  const result = await resultsRepo.findResultById(id);
+  if (!result) {
+    res.status(404).json({ error: "Result not found" });
+    return;
+  }
+  const access = await canAccessResult(req.user!, result);
+  if (!access) {
+    await denyAccess(req, res, {
+      error: "Not authorized to access this result",
+      details: "Unauthorized attempt to regenerate result access code",
+      resultId: result.id,
+    });
+    return;
+  }
+
+  const patient = await patientsRepo.findPatientById(result.patientId);
+  if (!patient) {
+    res.status(404).json({ error: "Patient not found" });
+    return;
+  }
+
+  const rawEmail =
+    typeof req.body?.email === "string"
+      ? req.body.email
+      : typeof req.body?.recipientEmail === "string"
+        ? req.body.recipientEmail
+        : "";
+  const recipientEmail = normalizeRecipientEmail(
+    rawEmail || resolvePatientPortalEmail(patient.email) || "",
+  );
+  if (!isValidRecipientEmail(recipientEmail)) {
+    res.status(400).json({
+      error: "A valid recipient email is required to regenerate and send the document access code.",
+    });
+    return;
+  }
+
+  const issued = await issueResultAccessCode({
+    result,
+    patient,
+    email: recipientEmail,
+    mode: "regenerate",
+  });
+  await logAudit({
+    action: "access_code_regen",
+    req,
+    userId: req.user!.userId,
+    userName: req.user!.username,
+    patientHisId: patient.patientHisId,
+    resultId: result.id,
+    details: JSON.stringify({
+      operation: "result_access_code_regenerate",
+      emailAccepted: issued.ok ? true : issued.emailAccepted,
+      emailedToMasked: issued.ok ? issued.emailedToMasked : null,
+    }),
+  });
+
+  if (!issued.ok) {
+    res.status(issued.status).json({
+      error: issued.error,
+      accessCodeEmail: {
+        accepted: issued.emailAccepted === true,
+        status: issued.emailAccepted ? "uncertain" : "failed",
+      },
+    });
+    return;
+  }
+
+  res.json({
+    ...formatResult(issued.result, await resultExtras(issued.result, req.user!)),
+    accessCodeEmail: {
+      accepted: true,
+      status: "accepted",
+      emailedToMasked: issued.emailedToMasked,
+    },
+  });
+});
+
+router.post("/results/:id/resend-access-code", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(String(req.params.id), 10);
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ error: "Invalid result id" });
+    return;
+  }
+  if (!canRegenerateAccessCode(req.user!.role)) {
+    await denyAccess(req, res, {
+      error: "Not authorized to resend access codes",
+      details: "Unauthorized attempt to resend result access code",
+      resultId: id,
+    });
+    return;
+  }
+
+  const result = await resultsRepo.findResultById(id);
+  if (!result) {
+    res.status(404).json({ error: "Result not found" });
+    return;
+  }
+  const access = await canAccessResult(req.user!, result);
+  if (!access) {
+    await denyAccess(req, res, {
+      error: "Not authorized to access this result",
+      details: "Unauthorized attempt to resend result access code",
+      resultId: result.id,
+    });
+    return;
+  }
+  const patient = await patientsRepo.findPatientById(result.patientId);
+  if (!patient) {
+    res.status(404).json({ error: "Patient not found" });
+    return;
+  }
+  const rawEmail =
+    typeof req.body?.email === "string"
+      ? req.body.email
+      : typeof req.body?.recipientEmail === "string"
+        ? req.body.recipientEmail
+        : "";
+  const recipientEmail = normalizeRecipientEmail(
+    rawEmail || resolvePatientPortalEmail(patient.email) || "",
+  );
+  if (!isValidRecipientEmail(recipientEmail)) {
+    res.status(400).json({ error: "A valid recipient email is required." });
+    return;
+  }
+
+  const issued = await issueResultAccessCode({
+    result,
+    patient,
+    email: recipientEmail,
+    mode: "retry_email",
+  });
+  await logAudit({
+    action: "access_code_regen",
+    req,
+    userId: req.user!.userId,
+    userName: req.user!.username,
+    patientHisId: patient.patientHisId,
+    resultId: result.id,
+    details: JSON.stringify({
+      operation: "result_access_code_resend",
+      emailAccepted: issued.ok ? true : issued.emailAccepted,
+      emailedToMasked: issued.ok ? issued.emailedToMasked : null,
+    }),
+  });
+  if (!issued.ok) {
+    res.status(issued.status).json({ error: issued.error });
+    return;
+  }
+  res.json({
+    ...formatResult(issued.result, await resultExtras(issued.result, req.user!)),
+    accessCodeEmail: {
+      accepted: true,
+      status: "accepted",
+      emailedToMasked: issued.emailedToMasked,
+    },
+  });
+});
+
+router.get("/results/:id/print-ready", requireAuth, async (req, res): Promise<void> => {
+  const id = parseInt(String(req.params.id), 10);
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ error: "Invalid result id" });
+    return;
+  }
+
+  const result = await resultsRepo.findResultById(id);
+  if (!result) {
+    res.status(404).json({ error: "Result not found" });
+    return;
+  }
+  const access = await canAccessResult(req.user!, result);
+  if (!access) {
+    await denyAccess(req, res, {
+      error: "Not authorized to access this result",
+      details: "Unauthorized attempt to generate print-ready result",
+      resultId: result.id,
+    });
+    return;
+  }
+
+  const accessCode = revealResultAccessCodeForPrint(result);
+  if (!accessCode) {
+    res.status(409).json({
+      error: "No active document access code. Upload email issuance or regenerate first.",
+    });
+    return;
+  }
+
+  let filePath: string;
+  try {
+    filePath = getFilePath(result.fileName);
+  } catch {
+    res.status(400).json({ error: "Invalid file path" });
+    return;
+  }
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({ error: "File not found on disk" });
+    return;
+  }
+
+  try {
+    const { buildPrintReadyPdf } = await import("../lib/result-print");
+    const original = fs.readFileSync(filePath);
+    const stamped = await buildPrintReadyPdf({
+      originalBytes: original,
+      fileType: result.fileType,
+      accessCode,
+      documentLabel: result.originalFileName,
+    });
+    const patient = await patientsRepo.findPatientById(result.patientId);
+    await logAudit({
+      action: "download",
+      req,
+      userId: req.user!.userId,
+      userName: req.user!.username,
+      patientHisId: patient?.patientHisId ?? null,
+      resultId: result.id,
+      details: "result_print_ready_generated",
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${encodeURIComponent(`print-${result.originalFileName.replace(/\.pdf$/i, "")}.pdf`)}"`,
+    );
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(Buffer.from(stamped));
+  } catch (err) {
+    res.status(500).json({ error: "Unable to build print-ready document." });
+  }
+});
+
 
 export default router;

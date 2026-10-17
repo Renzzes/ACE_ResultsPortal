@@ -1051,6 +1051,133 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /results/{id}/regenerate-access-code:
+    post:
+      operationId: regenerateResultAccessCode
+      tags: [results]
+      summary: Regenerate document access code and email it
+      description: |
+        Requires staff access JWT. Rotates the document-specific access code, stores bcrypt+AES material,
+        and emails the new code to the patient recipient. Does not return the plaintext code.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                recipientEmail: { type: string, format: email }
+      responses:
+        "200":
+          description: Code regenerated and email accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Result"
+                  - type: object
+                    properties:
+                      accessCodeEmail:
+                        type: object
+                        properties:
+                          accepted: { type: boolean }
+                          status: { type: string }
+                          emailedToMasked: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /results/{id}/resend-access-code:
+    post:
+      operationId: resendResultAccessCode
+      tags: [results]
+      summary: Resend existing document access code email
+      description: |
+        Requires staff access JWT. Re-emails the current document access code without rotating it.
+        Does not return the plaintext code.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                recipientEmail: { type: string, format: email }
+      responses:
+        "200":
+          description: Email accepted for the existing code
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Result"
+                  - type: object
+                    properties:
+                      accessCodeEmail:
+                        type: object
+                        properties:
+                          accepted: { type: boolean }
+                          status: { type: string }
+                          emailedToMasked: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /results/{id}/print-ready:
+    get:
+      operationId: getResultPrintReady
+      tags: [results]
+      summary: Generate print-ready PDF with document access code header
+      description: |
+        Requires staff access JWT. Returns a derived PDF with the document-specific access code
+        in the header on every page. Source PDF on disk is not modified.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Print-ready PDF
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /results/{id}/download:
     get:
       operationId: getResultDownloadUrl
@@ -1304,10 +1431,11 @@ paths:
     post:
       operationId: verifyPatientAccess
       tags: [patient-portal]
-      summary: Unlock patient results with access code
+      summary: Unlock a diagnostic document with its access code
       description: |
         Requires portal JWT. Rate limited (20 / 15 minutes → 429).
-        Validates the patient access code for viewing/downloading diagnostic results.
+        Validates a document-specific access code for the given `resultId`.
+        A valid code unlocks only that document for the authenticated patient.
         Portal sign-in uses `POST /portal/login` with Hospital Patient ID and password instead.
       security:
         - portalBearer: []
@@ -1317,19 +1445,21 @@ paths:
           application/json:
             schema:
               type: object
-              required: [accessCode]
+              required: [accessCode, resultId]
               properties:
                 accessCode: { type: string, maxLength: 32 }
+                resultId: { type: integer, minimum: 1 }
       responses:
         "200":
-          description: Results access granted for this session
+          description: Document access granted for this session
           content:
             application/json:
               schema:
                 type: object
-                required: [unlocked]
+                required: [unlocked, resultId]
                 properties:
                   unlocked: { type: boolean, enum: [true] }
+                  resultId: { type: integer }
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -3478,6 +3608,11 @@ components:
           type: string
         dateReleased:
           type: ["string", "null"]
+        locked:
+          type: boolean
+          description: >
+            True when the request did not include a valid access code.
+            Listing is allowed while locked; document content is not.
 
     PortalOverviewPatient:
       type: object

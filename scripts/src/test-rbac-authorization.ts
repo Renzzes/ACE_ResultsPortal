@@ -37,6 +37,11 @@ function fakeResult(overrides: Partial<ResultRow> = {}): ResultRow {
     uploadedAt: new Date(),
     createdAt: new Date(),
     updatedAt: new Date(),
+    accessCodeHash: null,
+    accessCodeEncrypted: null,
+    accessCodeIssuedAt: null,
+    accessCodeEmailedAt: null,
+    accessCodeEmailStatus: null,
     ...overrides,
   };
 }

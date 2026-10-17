@@ -3,8 +3,20 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    "noEmit": true
   },
-  "include": ["src"],
-  "exclude": ["src/test-storage.ts", "src/test-openapi-contract.ts", "src/test-rbac-authorization.ts", "src/test-department-authorization.ts", "src/department-test-fixture.ts", "src/test-patient-department-membership.ts", "src/test-staff-hospital-lookup.ts", "src/test-staff-patient-history.ts", "src/test-staff-result-workflow.ts", "src/test-result-reviews.ts", "src/test-phase-h-workflow.ts", "src/test-phase-h4-portal-isolation.ts", "src/test-phase-h52-portal-sessions.ts", "src/test-phase-h53-tab-sessions.ts", "src/test-phase-h54-legacy-cutover.ts", "src/test-messaging-rbac.ts", "src/test-direct-conversation.ts", "src/test-message-live.ts", "src/test-message-delete.ts", "src/test-portal-access-login.ts", "src/test-physician-access.ts", "src/test-portal-recovery-security.ts", "src/test-admin-recovery-corrections.ts", "src/test-portal-activation-gate.ts", "src/test-patient-notifications.ts", "src/test-patient-messaging.ts", "src/test-portal-profile-security.ts", "src/test-portal-appointment-security.ts", "src/test-result-physician-assignment.ts", "src/test-result-physician-copy.ts", "src/test-prescriptions-security.ts", "src/test-prescriptions-lifecycle.ts", "src/test-patient-care-history-security.ts", "src/test-account-status.ts", "src/test-patient-employee-separation.ts", "src/test-staff-hospital-no-portal.ts", "src/test-server-upload-category.ts", "src/test-password-visibility.ts", "src/test-email-diagnostic-access-code.ts", "src/test-admin-patient-accounts.ts", "src/test-patient-contact-support.ts", "src/test-p1-credential-workflows.ts", "src/probe-portal-login.ts"]
+  "include": [
+    "src/hello.ts",
+    "src/seed-admin.ts",
+    "src/seed-doctor.ts",
+    "src/seed-patient.ts",
+    "src/seed-staff.ts",
+    "src/verify-env.ts",
+    "src/verify-storage.ts",
+    "src/verify-admin-overview.ts",
+    "src/apply-012-access-code-request.ts",
+    "src/apply-019-result-access-codes.ts",
+    "src/preflight-schema-check.ts"
+  ]
 }
