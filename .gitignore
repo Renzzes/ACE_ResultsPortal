@@ -63,3 +63,15 @@ var/result-files/
 
 # Local test evidence — keep out of source commits
 artifacts/test-output/
+artifacts/api-server/uploads-browser-test/
+
+# Credentials / keys / backups — never publish
+*.pem
+*.p12
+*.pfx
+*.bak
+id_rsa
+id_rsa.pub
+
+# Local runtime data (if created under the repo)
+var/
